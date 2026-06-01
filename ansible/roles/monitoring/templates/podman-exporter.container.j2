@@ -1,0 +1,14 @@
+[Unit]
+Description=Podman Exporter
+After=network-online.target
+
+[Container]
+Image=quay.io/navidys/prometheus-podman-exporter:{{ podman_exporter_version }}
+ContainerName=podman-exporter
+User=0
+Network=monitoring-net
+Environment=CONTAINER_HOST=unix:///run/podman/podman.sock
+Volume=/run/user/{{ deploy_user_info.uid }}/podman/podman.sock:/run/podman/podman.sock:rw,z
+
+[Install]
+WantedBy=default.target

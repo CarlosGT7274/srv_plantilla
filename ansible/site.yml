@@ -1,0 +1,11 @@
+---
+- name: Configure Infrastructure
+  hosts: all
+  become: yes
+  roles:
+    - common
+    - podman
+    - traefik
+    - monitoring
+    - databases
+    - apps

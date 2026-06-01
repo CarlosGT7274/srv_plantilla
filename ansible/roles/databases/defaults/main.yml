@@ -1,0 +1,16 @@
+---
+# ansible/roles/databases/defaults/main.yml
+databases_dir: "/home/{{ deploy_user }}/databases"
+managed_databases: []
+
+# Example managed_databases:
+# - name: prod-mysql
+#   type: mysql
+#   image: docker.io/library/mysql:8.0
+#   port: 3306
+#   external_access: true
+#   domain: db.example.com
+#   env:
+#     MYSQL_ROOT_PASSWORD: "secretpassword"
+#   whitelist_ips:
+#     - "1.2.3.4"

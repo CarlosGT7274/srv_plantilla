@@ -1,0 +1,60 @@
+---
+# ansible/roles/podman/tasks/main.yml
+- name: Install Podman and related tools
+  dnf:
+    name:
+      - podman
+      - skopeo
+      - buildah
+      - slirp4netns
+      - fuse-overlayfs
+    state: present
+
+- name: Get deploy user info
+  user:
+    name: "{{ deploy_user }}"
+  register: deploy_user_info
+
+- name: Enable linger for deploy user
+  command: "loginctl enable-linger {{ deploy_user }}"
+  args:
+    creates: "/var/lib/systemd/linger/{{ deploy_user }}"
+
+- name: Create Quadlet directory for deploy user
+  file:
+    path: "/home/{{ deploy_user }}/.config/containers/systemd"
+    state: directory
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: '0755'
+
+- name: Create systemd user directory
+  file:
+    path: "/home/{{ deploy_user }}/.config/systemd/user"
+    state: directory
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: '0755'
+
+- name: Ensure podman socket is started and enabled for deploy user
+  systemd:
+    name: podman.socket
+    scope: user
+    state: started
+    enabled: yes
+  become: yes
+  become_user: "{{ deploy_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ deploy_user_info.uid }}"
+
+- name: Create podman networks
+  containers.podman.podman_network:
+    name: "{{ item }}"
+    state: present
+  loop:
+    - proxy-net
+    - monitoring-net
+  become: yes
+  become_user: "{{ deploy_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ deploy_user_info.uid }}"

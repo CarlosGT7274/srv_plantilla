@@ -1,0 +1,86 @@
+---
+# ansible/roles/paas-controller/tasks/main.yml
+- name: Install Node.js 22 and Build tools
+  dnf:
+    name:
+      - nodejs
+      - npm
+      - git
+      - buildah
+    state: present
+  become: yes
+
+- name: Get deploy user info
+  user:
+    name: "{{ deploy_user }}"
+  register: deploy_user_info
+
+- name: Create Controller directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: '0755'
+  loop:
+    - "{{ controller_dir }}"
+    - "{{ controller_dir }}/src"
+    - "{{ controller_dir }}/builds"
+    - "{{ controller_dir }}/config"
+
+- name: Sync Controller source
+  synchronize:
+    src: "../../../../controller/"
+    dest: "{{ controller_dir }}/"
+    recursive: yes
+    delete: yes
+    rsync_opts:
+      - "--exclude=node_modules"
+      - "--exclude=dist"
+
+- name: Install Controller dependencies
+  npm:
+    path: "{{ controller_dir }}"
+    state: present
+  become: yes
+  become_user: "{{ deploy_user }}"
+
+- name: Build Controller
+  command: npm run build
+  args:
+    chdir: "{{ controller_dir }}"
+  become: yes
+  become_user: "{{ deploy_user }}"
+
+- name: Template Controller configuration
+  template:
+    src: config.json.j2
+    dest: "{{ controller_dir }}/config/apps.json"
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: '0644'
+
+- name: Deploy Controller Service
+  template:
+    src: controller.service.j2
+    dest: "/home/{{ deploy_user }}/.config/containers/systemd/paas-controller.service"
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: '0644'
+  notify: Reload systemd user
+
+- name: Flush handlers to reload systemd
+  meta: flush_handlers
+
+- name: Ensure Controller is started and enabled
+  systemd:
+    name: paas-controller.service
+    scope: user
+    state: started
+    enabled: yes
+    daemon_reload: yes
+  become: yes
+  become_user: "{{ deploy_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ deploy_user_info.uid }}"
+    DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ deploy_user_info.uid }}/bus"

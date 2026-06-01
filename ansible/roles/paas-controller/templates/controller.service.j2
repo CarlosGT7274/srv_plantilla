@@ -1,0 +1,18 @@
+[Unit]
+Description=PaaS Deploy Controller
+After=network.target
+
+[Service]
+Type=simple
+User={{ deploy_user }}
+WorkingDirectory={{ controller_dir }}
+ExecStart=/usr/bin/node dist/index.js
+Restart=always
+Environment=PORT={{ controller_port }}
+Environment=GITHUB_SECRET={{ controller_github_secret }}
+Environment=CONFIG_PATH={{ controller_dir }}/config/apps.json
+Environment=BUILDS_DIR={{ controller_dir }}/builds
+Environment=QUADLET_DIR=/home/{{ deploy_user }}/.config/containers/systemd
+
+[Install]
+WantedBy=default.target

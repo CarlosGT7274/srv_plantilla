@@ -1,0 +1,12 @@
+[Unit]
+Description=Alertmanager
+After=network-online.target
+
+[Container]
+Image=docker.io/prom/alertmanager:{{ alertmanager_version }}
+ContainerName=alertmanager
+Network=monitoring-net
+Volume={{ monitoring_dir }}/alertmanager:/etc/alertmanager:z
+
+[Install]
+WantedBy=default.target

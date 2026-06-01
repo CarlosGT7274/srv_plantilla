@@ -1,0 +1,64 @@
+---
+# ansible/roles/common/tasks/main.yml
+- name: Install basic packages
+  dnf:
+    name:
+      - vim
+      - git
+      - curl
+      - wget
+      - firewalld
+      - selinux-policy-targeted
+      - policycoreutils-python-utils
+      - python3-libselinux
+      - tar
+      - unzip
+    state: present
+
+- name: Ensure firewalld is running and enabled
+  systemd:
+    name: firewalld
+    state: started
+    enabled: yes
+
+- name: Configure firewalld services
+  firewalld:
+    service: "{{ item }}"
+    permanent: yes
+    state: enabled
+    immediate: yes
+  loop: "{{ allowed_firewalld_services }}"
+
+- name: Create deploy user
+  user:
+    name: "{{ deploy_user }}"
+    shell: "{{ deploy_user_shell }}"
+    groups: wheel
+    append: yes
+    state: present
+  register: deploy_user_info
+
+- name: Ensure .ssh directory exists for deploy user
+  file:
+    path: "/home/{{ deploy_user }}/.ssh"
+    state: directory
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: '0700'
+
+- name: Configure SSH Daemon
+  lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: "^#?{{ item.key }}"
+    line: "{{ item.key }} {{ item.value }}"
+    state: present
+  loop:
+    - { key: "PermitRootLogin", value: "{{ ssh_permit_root_login }}" }
+    - { key: "PasswordAuthentication", value: "{{ ssh_password_authentication }}" }
+    - { key: "Port", value: "{{ ssh_port }}" }
+  notify: Restart SSH
+
+- name: Set SELinux to enforcing
+  selinux:
+    policy: targeted
+    state: enforcing

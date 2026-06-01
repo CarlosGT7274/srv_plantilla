@@ -1,0 +1,40 @@
+[Unit]
+Description=Node App {{ item.name }}
+After=network-online.target
+
+[Container]
+Image={{ item.image }}
+ContainerName={{ item.name }}
+Network=proxy-net
+{% if item.command is defined %}
+Exec={{ item.command }}
+{% endif %}
+
+# Environment Variables & Secrets
+{% for key, value in (item.env | default({})).items() %}
+Environment={{ key }}={{ value }}
+{% endfor %}
+
+# Healthcheck for Zero-Downtime Detection
+HealthCmd=curl -f http://localhost:{{ item.port }}/health || exit 1
+HealthInterval=10s
+HealthRetries=3
+HealthTimeout=5s
+HealthStartPeriod=30s
+
+# Traefik Automation
+Label=traefik.enable=true
+Label=traefik.http.routers.{{ item.name }}.rule=Host(`{{ item.domain }}`)
+Label=traefik.http.routers.{{ item.name }}.entrypoints=websecure
+Label=traefik.http.routers.{{ item.name }}.tls.certresolver=letsencrypt
+Label=traefik.http.services.{{ item.name }}.loadbalancer.server.port={{ item.port }}
+# Ensure Traefik waits for healthcheck before routing if possible
+Label=traefik.http.services.{{ item.name }}.loadbalancer.healthcheck.path=/health
+
+[Service]
+# Auto-restart if the app crashes
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=default.target

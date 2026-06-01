@@ -1,0 +1,66 @@
+name: Build and Deploy Node App
+
+on:
+  workflow_call:
+    inputs:
+      app_name:
+        required: true
+        type: string
+      domain:
+        required: true
+        type: string
+      image_name:
+        required: true
+        type: string
+    secrets:
+      GH_TOKEN:
+        required: true
+      SSH_PRIVATE_KEY:
+        required: true
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GH_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/${{ inputs.image_name }}:${{ github.sha }},ghcr.io/${{ github.repository_owner }}/${{ inputs.image_name }}:latest
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Infra Code
+        uses: actions/checkout@v3
+        with:
+          repository: your-org/infra-repo # Points to THIS repo
+          token: ${{ secrets.GH_TOKEN }}
+
+      - name: Update Ansible App Version
+        run: |
+          # Use sed or yq to update the image tag in group_vars or defaults
+          # For this example, we'll pass it as an extra-var
+          echo "Deploying version ${{ github.sha }}"
+
+      - name: Run Ansible Deploy
+        env:
+          ANSIBLE_HOST_KEY_CHECKING: 'false'
+        run: |
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > id_rsa
+          chmod 600 id_rsa
+          ansible-playbook -i ansible/inventory/hosts.yml ansible/site.yml \
+            --private-key id_rsa \
+            --extra-vars "app_version=${{ github.sha }}" \
+            --tags apps

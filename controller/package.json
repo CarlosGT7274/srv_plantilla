@@ -1,0 +1,23 @@
+{
+  "name": "paas-controller",
+  "version": "1.0.0",
+  "description": "Mini-PaaS Deploy Controller",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts"
+  },
+  "dependencies": {
+    "fastify": "^4.27.0",
+    "simple-git": "^3.24.0",
+    "zod": "^3.23.8",
+    "js-yaml": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/js-yaml": "^4.0.9",
+    "typescript": "^5.4.5",
+    "ts-node": "^10.9.2"
+  }
+}

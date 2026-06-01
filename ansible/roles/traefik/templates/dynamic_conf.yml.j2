@@ -1,0 +1,37 @@
+http:
+  middlewares:
+    global-security-headers:
+      headers:
+        frameDeny: true
+        browserXssFilter: true
+        contentTypeNosniff: true
+        forceSTSHeader: true
+        stsSeconds: 31536000
+        stsIncludeSubdomains: true
+        stsPreload: true
+        referrerPolicy: "strict-origin-when-cross-origin"
+
+    global-ratelimit:
+      rateLimit:
+        average: {{ traefik_ratelimit_average }}
+        burst: {{ traefik_ratelimit_burst }}
+
+    internal-auth:
+      basicAuth:
+        users:
+          - "{{ traefik_dashboard_user }}:{{ traefik_dashboard_pass }}"
+
+    gzip:
+      compress: {}
+
+  # Router for Traefik Dashboard (Internal)
+  routers:
+    api:
+      rule: Host(`traefik.{{ main_domain }}`)
+      service: api@internal
+      entryPoints:
+        - websecure
+      middlewares:
+        - internal-auth
+      tls:
+        certResolver: letsencrypt

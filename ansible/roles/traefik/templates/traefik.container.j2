@@ -1,0 +1,20 @@
+[Unit]
+Description=Traefik Reverse Proxy
+After=network-online.target
+
+[Container]
+Image={{ traefik_image }}
+ContainerName=traefik
+PublishPort=80:80
+PublishPort=443:443
+PublishPort=3306:3306
+PublishPort=5432:5432
+Network=proxy-net
+# Mount the Podman User Socket for API-compatible discovery
+Volume=/run/user/{{ deploy_user_info.uid }}/podman/podman.sock:/var/run/docker.sock:ro,z
+Volume={{ traefik_config_dir }}/traefik.yml:/etc/traefik/traefik.yml:z
+Volume={{ traefik_config_dir }}/acme:/etc/traefik/acme:z
+Volume={{ traefik_config_dir }}/conf.d:/etc/traefik/conf.d:z
+
+[Install]
+WantedBy=default.target

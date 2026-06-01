@@ -1,0 +1,26 @@
+[Unit]
+Description=Database App {{ item.name }}
+After=network-online.target
+
+[Container]
+Image={{ item.image }}
+ContainerName={{ item.name }}
+Network=proxy-net
+Volume={{ databases_dir }}/{{ item.name }}:/var/lib/{{ item.type }}/data:z
+{% for key, value in (item.env | default({})).items() %}
+Environment={{ key }}={{ value }}
+{% endfor %}
+
+# Traefik TCP Labels for External Access
+{% if item.external_access | default(false) %}
+Label=traefik.enable=true
+Label=traefik.tcp.routers.{{ item.name }}.entrypoints={{ item.type }}
+Label=traefik.tcp.routers.{{ item.name }}.rule=HostSNI(`*`)
+Label=traefik.tcp.services.{{ item.name }}.loadbalancer.server.port={{ item.port }}
+{% endif %}
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=default.target

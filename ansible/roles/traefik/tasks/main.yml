@@ -1,0 +1,61 @@
+---
+# ansible/roles/traefik/tasks/main.yml
+- name: Allow low port binding for rootless
+  sysctl:
+    name: net.ipv4.ip_unprivileged_port_start
+    value: "80"
+    state: present
+    sysctl_file: /etc/sysctl.d/99-podman-ports.conf
+
+- name: Create Traefik directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: '0755'
+  loop:
+    - "{{ traefik_config_dir }}"
+    - "{{ traefik_config_dir }}/acme"
+    - "{{ traefik_config_dir }}/conf.d"
+
+- name: Template static configuration
+  template:
+    src: traefik.yml.j2
+    dest: "{{ traefik_config_dir }}/traefik.yml"
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: '0644'
+
+- name: Template dynamic configuration (middlewares)
+  template:
+    src: dynamic_conf.yml.j2
+    dest: "{{ traefik_config_dir }}/conf.d/dynamic_conf.yml"
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: '0644'
+
+- name: Deploy Traefik Quadlet
+  template:
+    src: traefik.container.j2
+    dest: "/home/{{ deploy_user }}/.config/containers/systemd/traefik.container"
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: '0644'
+  notify: Reload systemd user
+
+- name: Flush handlers to reload systemd
+  meta: flush_handlers
+
+- name: Ensure Traefik is started and enabled
+  systemd:
+    name: traefik.service
+    scope: user
+    state: started
+    enabled: yes
+    daemon_reload: yes
+  become: yes
+  become_user: "{{ deploy_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ deploy_user_info.uid }}"
+    DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ deploy_user_info.uid }}/bus"

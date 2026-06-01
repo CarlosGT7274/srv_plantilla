@@ -1,0 +1,11 @@
+---
+# ansible/roles/common/defaults/main.yml
+ssh_port: 22
+ssh_permit_root_login: "prohibit-password"
+ssh_password_authentication: "no"
+deploy_user: deploy
+deploy_user_shell: /bin/bash
+allowed_firewalld_services:
+  - ssh
+  - http
+  - https

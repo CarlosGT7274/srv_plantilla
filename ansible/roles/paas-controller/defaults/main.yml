@@ -1,0 +1,11 @@
+---
+# ansible/roles/paas-controller/defaults/main.yml
+controller_version: latest
+controller_port: 3000
+controller_dir: "/home/{{ deploy_user }}/paas-controller"
+controller_image: "localhost/paas-controller:{{ controller_version }}"
+controller_github_secret: "holden1095_secret_2026"
+controller_domain: "deploy.{{ main_domain }}"
+
+# Repositories to watch
+managed_apps: []
