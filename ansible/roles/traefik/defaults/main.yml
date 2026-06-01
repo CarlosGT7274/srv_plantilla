@@ -1,14 +1,11 @@
 ---
-# ansible/roles/traefik/defaults/main.yml
 traefik_version: latest
 traefik_acme_email: "admin@{{ main_domain }}"
 traefik_config_dir: "/home/{{ deploy_user }}/traefik"
 traefik_image: docker.io/library/traefik:{{ traefik_version }}
 
-# Security
 traefik_dashboard_user: admin
-traefik_dashboard_pass: "$apr1$v6u5r9v3$V/mY/j8mO3v5B4Q7gXF6X/" # password: admin (PLEASE CHANGE THIS LATER)
+traefik_dashboard_pass: "$apr1$UaUfSwGI$ZcVz3zhZ9tzdN4ot8RiGA."
 
-# Rate Limiting
 traefik_ratelimit_average: 100
 traefik_ratelimit_burst: 50

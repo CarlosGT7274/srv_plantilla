@@ -3,9 +3,9 @@
   hosts: all
   become: yes
   roles:
-    - common
-    - podman
-    - traefik
-    - monitoring
-    - databases
-    - apps
+    - { role: common, tags: common }
+    - { role: podman, tags: podman }
+    - { role: traefik, tags: traefik }
+    - { role: monitoring, tags: monitoring }
+    - { role: databases, tags: databases }
+    - { role: apps, tags: apps }

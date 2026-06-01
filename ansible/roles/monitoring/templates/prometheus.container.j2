@@ -9,7 +9,6 @@ Network=monitoring-net
 Network=proxy-net
 Volume={{ monitoring_dir }}/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:z
 Volume={{ monitoring_dir }}/prometheus/data:/prometheus:z,U
-# Traefik Labels
 Label=traefik.enable=true
 Label=traefik.http.routers.prometheus.rule=Host(`{{ prometheus_domain }}`)
 Label=traefik.http.routers.prometheus.entrypoints=websecure

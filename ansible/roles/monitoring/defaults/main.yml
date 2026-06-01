@@ -7,6 +7,6 @@ alertmanager_version: v0.27.0
 node_exporter_version: v1.8.1
 podman_exporter_version: v1.12.0
 
-grafana_admin_password: "admin_holden1095" # Security updated
+grafana_admin_password: "admin_holden1095" # Volvemos a la pass solicitada
 grafana_domain: "grafana.{{ main_domain }}"
 prometheus_domain: "prometheus.{{ main_domain }}"

@@ -1,5 +1,10 @@
 ---
 # ansible/roles/databases/tasks/main.yml
+- name: Get deploy user info
+  user:
+    name: "{{ deploy_user }}"
+  register: deploy_user_info
+
 - name: Create database directories
   file:
     path: "{{ databases_dir }}/{{ item.name }}"

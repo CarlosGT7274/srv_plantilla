@@ -1,5 +1,10 @@
 ---
 # ansible/roles/apps/tasks/main.yml
+- name: Get deploy user info
+  user:
+    name: "{{ deploy_user }}"
+  register: deploy_user_info
+
 - name: Deploy Node.js Apps via Quadlets
   template:
     src: app.container.j2
