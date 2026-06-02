@@ -4,10 +4,10 @@ After=network.target
 
 [Service]
 Type=simple
-User={{ deploy_user }}
 WorkingDirectory={{ controller_dir }}
 ExecStart=/usr/bin/node dist/index.js
 Restart=always
+RestartSec=5s
 Environment=PORT={{ controller_port }}
 Environment=GITHUB_SECRET={{ controller_github_secret }}
 Environment=CONFIG_PATH={{ controller_dir }}/config/apps.json

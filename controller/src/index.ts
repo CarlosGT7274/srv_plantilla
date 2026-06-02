@@ -34,10 +34,9 @@ fastify.post('/webhook', async (request, reply) => {
     return reply.status(401).send({ error: 'Invalid signature' });
   }
 
-  const payload: any = request.body;
+  const payload = request.body as { repository: { clone_url: string } };
   const repoUrl = payload.repository.clone_url;
-  
-  // Load config
+
   const config: AppConfig[] = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
   const app = config.find(a => a.repo === repoUrl);
 
@@ -46,7 +45,7 @@ fastify.post('/webhook', async (request, reply) => {
   }
 
   fastify.log.info(`Building ${app.name}...`);
-  
+
   try {
     const buildPath = path.join(BUILDS_DIR, app.name);
     const git = simpleGit();
@@ -57,14 +56,26 @@ fastify.post('/webhook', async (request, reply) => {
       await git.cwd(buildPath).pull();
     }
 
-    const commitHash = execSync('git rev-parse --short HEAD', { cwd: buildPath }).toString().trim();
+    const commitHash = execSync('git rev-parse --short HEAD', { cwd: buildPath })
+      .toString()
+      .trim();
     const imageName = `localhost/${app.name}:${commitHash}`;
 
-    // Podman Build
-    fastify.log.info(`Starting podman build for ${imageName}`);
-    execSync(`podman build -t ${imageName} .`, { cwd: buildPath, stdio: 'inherit' });
+    // Buildpacks — no necesita Dockerfile
+    fastify.log.info(`Building image with Buildpacks: ${imageName}`);
+    const envFlags = Object.entries(app.env || {})
+      .map(([k, v]) => `--env ${k}=${v}`)
+      .join(' ');
 
-    // Generate Quadlet
+    execSync(
+      `pack build ${imageName} \
+        --builder paketobuildpacks/builder-jammy-full \
+        --publish=false \
+        ${envFlags}`,
+      { cwd: buildPath, stdio: 'inherit' }
+    );
+
+    // Genera el Quadlet
     const quadletContent = `
 [Unit]
 Description=PaaS App ${app.name}
@@ -86,6 +97,7 @@ Label=traefik.http.services.${app.name}.loadbalancer.server.port=${app.port}
 
 [Service]
 Restart=always
+RestartSec=5s
 
 [Install]
 WantedBy=default.target
@@ -93,14 +105,15 @@ WantedBy=default.target
 
     fs.writeFileSync(path.join(QUADLET_DIR, `${app.name}.container`), quadletContent);
 
-    // Reload systemd
-    execSync('systemctl --user daemon-reload');
-    execSync(`systemctl --user restart ${app.name}`);
+    // Reload systemd y restart
+    execSync('systemctl --user daemon-reload', { stdio: 'inherit' });
+    execSync(`systemctl --user restart ${app.name}`, { stdio: 'inherit' });
 
     return { message: 'Deployed successfully', image: imageName };
-  } catch (err: any) {
-    fastify.log.error(err);
-    return reply.status(500).send({ error: 'Deploy failed', details: err.message });
+  } catch (err) {
+    const error = err as Error;
+    fastify.log.error(error);
+    return reply.status(500).send({ error: 'Deploy failed', details: error.message });
   }
 });
 

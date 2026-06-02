@@ -9,3 +9,4 @@
     - { role: monitoring, tags: monitoring }
     - { role: databases, tags: databases }
     - { role: apps, tags: apps }
+    - { role: paas-controller, tags: paas-controller }

@@ -1,5 +1,4 @@
 ---
-# ansible/roles/paas-controller/tasks/main.yml
 - name: Install Node.js 22 and Build tools
   dnf:
     name:
@@ -15,6 +14,23 @@
     name: "{{ deploy_user }}"
   register: deploy_user_info
 
+- name: Install pack CLI
+  shell: |
+    curl -sSL "https://github.com/buildpacks/pack/releases/download/v0.35.1/pack-v0.35.1-linux.tgz" | tar -C /usr/local/bin/ --no-same-owner -xzv pack
+  args:
+    creates: /usr/local/bin/pack
+  become: yes
+
+- name: Sync Controller source
+  synchronize:
+    src: "../../../../controller/"
+    dest: "{{ controller_dir }}/"
+    recursive: yes
+    delete: yes
+    rsync_opts:
+      - "--exclude=node_modules"
+      - "--exclude=dist"
+
 - name: Create Controller directories
   file:
     path: "{{ item }}"
@@ -27,16 +43,6 @@
     - "{{ controller_dir }}/src"
     - "{{ controller_dir }}/builds"
     - "{{ controller_dir }}/config"
-
-- name: Sync Controller source
-  synchronize:
-    src: "../../../../controller/"
-    dest: "{{ controller_dir }}/"
-    recursive: yes
-    delete: yes
-    rsync_opts:
-      - "--exclude=node_modules"
-      - "--exclude=dist"
 
 - name: Install Controller dependencies
   npm:
@@ -63,7 +69,7 @@
 - name: Deploy Controller Service
   template:
     src: controller.service.j2
-    dest: "/home/{{ deploy_user }}/.config/containers/systemd/paas-controller.service"
+    dest: "/home/{{ deploy_user }}/.config/systemd/user/paas-controller.service"
     owner: "{{ deploy_user }}"
     group: "{{ deploy_user }}"
     mode: '0644'

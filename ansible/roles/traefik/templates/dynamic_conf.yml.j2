@@ -24,7 +24,6 @@ http:
     gzip:
       compress: {}
 
-  # Router for Traefik Dashboard (Internal)
   routers:
     api:
       rule: Host(`traefik.{{ main_domain }}`)
@@ -35,3 +34,17 @@ http:
         - internal-auth
       tls:
         certResolver: letsencrypt
+
+    paas-controller:
+      rule: Host(`deploy.{{ main_domain }}`)
+      service: paas-controller
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+
+  services:
+    paas-controller:
+      loadBalancer:
+        servers:
+          - url: "http://{{ proxy_net_gateway.stdout }}:3000"
