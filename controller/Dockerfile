@@ -1,10 +1,6 @@
 FROM node:22-alpine
 
-RUN apk add --no-cache curl git
-
-# Pack CLI para buildpacks - detecta automaticamente cualquier lenguaje/package manager
-RUN curl -sSL "https://github.com/buildpacks/pack/releases/download/v0.35.1/pack-v0.35.1-linux.tgz" \
-    | tar -C /usr/local/bin/ --no-same-owner -xzv pack
+RUN apk add --no-cache curl git buildah fuse-overlayfs
 
 WORKDIR /app
 

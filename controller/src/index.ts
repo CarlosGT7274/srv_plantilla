@@ -382,7 +382,7 @@ async function triggerDeploy(app: AppConfig): Promise<void> {
 
     fastify.log.info(`Building image: ${imageName}`);
     execSync(
-      `podman --remote --url unix://${PODMAN_SOCK} build -t ${imageName} .`,
+      `buildah build --isolation=chroot -t ${imageName} .`,
       { cwd: buildPath, stdio: 'inherit' }
     );
 
