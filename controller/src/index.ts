@@ -3,8 +3,12 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { execSync } from 'child_process';
-import { request as httpRequest } from 'http';
+import { request as httpRequest, RequestOptions } from 'http';
 import simpleGit from 'simple-git';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+
+const execFileAsync = promisify(execFile);
 
 const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3000;
 const GITHUB_SECRET = process.env.GITHUB_SECRET || '';
@@ -29,13 +33,14 @@ interface AppConfig {
 
 // ── Project type detection ─────────────────────────────────────────────────
 
-type ProjectType = 'node-npm' | 'node-pnpm' | 'node-yarn' | 'node-bun' |
-  'python-pip' | 'python-poetry' | 'java-maven' |
-  'java-gradle' | 'go' | 'ruby' | 'unknown';
+type ProjectType =
+  | 'node-npm' | 'node-pnpm' | 'node-yarn' | 'node-bun'
+  | 'python-pip' | 'python-poetry'
+  | 'java-maven' | 'java-gradle'
+  | 'go' | 'ruby' | 'unknown';
 
 function detectProject(buildPath: string): ProjectType {
   const has = (f: string) => fs.existsSync(path.join(buildPath, f));
-
   if (has('pnpm-lock.yaml') || has('.pnpmfile.cjs')) return 'node-pnpm';
   if (has('yarn.lock')) return 'node-yarn';
   if (has('bun.lockb')) return 'node-bun';
@@ -52,71 +57,56 @@ function detectProject(buildPath: string): ProjectType {
 function generateDockerfile(type: ProjectType, port: number): string {
   switch (type) {
     case 'node-npm':
-      return `
-FROM node:22-alpine
-RUN apk add --no-cache curl
+      return `FROM node:22-slim
+RUN apt-get update && apt-get install -y curl openssl ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY package*.json ./
-RUN npm install
 COPY . .
+RUN npm install
 RUN npm run build --if-present
 EXPOSE ${port}
-CMD ["npm", "start"]
-`.trim();
+CMD ["npm", "start"]`;
 
     case 'node-pnpm':
-      return `
-FROM node:22-alpine
-RUN apk add --no-cache curl && npm install -g pnpm
+      return `FROM node:22-slim
+RUN apt-get update && apt-get install -y curl openssl ca-certificates && rm -rf /var/lib/apt/lists/* && npm install -g pnpm
 WORKDIR /app
-COPY package*.json pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
 COPY . .
-RUN pnpm run build --if-present
+RUN pnpm install --frozen-lockfile
+RUN pnpm run build
 EXPOSE ${port}
-CMD ["pnpm", "start"]
-`.trim();
+CMD ["pnpm", "start"]`;
 
     case 'node-yarn':
-      return `
-FROM node:22-alpine
-RUN apk add --no-cache curl
+      return `FROM node:22-slim
+RUN apt-get update && apt-get install -y curl openssl ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY package*.json yarn.lock ./
-RUN yarn install --frozen-lockfile
 COPY . .
+RUN yarn install --frozen-lockfile
 RUN yarn build --if-present
 EXPOSE ${port}
-CMD ["yarn", "start"]
-`.trim();
+CMD ["yarn", "start"]`;
 
     case 'node-bun':
-      return `
-FROM oven/bun:latest
+      return `FROM oven/bun:latest
 WORKDIR /app
-COPY bun.lockb package.json ./
-RUN bun install --frozen-lockfile
 COPY . .
+RUN bun install --frozen-lockfile
 RUN bun run build --if-present
 EXPOSE ${port}
-CMD ["bun", "start"]
-`.trim();
+CMD ["bun", "start"]`;
 
     case 'python-pip':
-      return `
-FROM python:3.12-slim
+      return `FROM python:3.12-slim
 RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 EXPOSE ${port}
-CMD ["python", "main.py"]
-`.trim();
+CMD ["python", "main.py"]`;
 
     case 'python-poetry':
-      return `
-FROM python:3.12-slim
+      return `FROM python:3.12-slim
 RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 RUN pip install poetry
 WORKDIR /app
@@ -124,72 +114,64 @@ COPY pyproject.toml poetry.lock* ./
 RUN poetry install --no-root --no-dev
 COPY . .
 EXPOSE ${port}
-CMD ["poetry", "run", "python", "main.py"]
-`.trim();
+CMD ["poetry", "run", "python", "main.py"]`;
 
     case 'java-maven':
-      return `
-FROM maven:3.9-eclipse-temurin-21 AS build
+      return `FROM maven:3.9-eclipse-temurin-21 AS build
 WORKDIR /app
 COPY pom.xml ./
 COPY src ./src
 RUN mvn package -DskipTests
-
 FROM eclipse-temurin:21-jre-alpine
 RUN apk add --no-cache curl
 WORKDIR /app
 COPY --from=build /app/target/*.jar app.jar
 EXPOSE ${port}
-CMD ["java", "-jar", "app.jar"]
-`.trim();
+CMD ["java", "-jar", "app.jar"]`;
 
     case 'java-gradle':
-      return `
-FROM gradle:8-jdk21 AS build
+      return `FROM gradle:8-jdk21 AS build
 WORKDIR /app
 COPY . .
 RUN gradle build -x test
-
 FROM eclipse-temurin:21-jre-alpine
 RUN apk add --no-cache curl
 WORKDIR /app
 COPY --from=build /app/build/libs/*.jar app.jar
 EXPOSE ${port}
-CMD ["java", "-jar", "app.jar"]
-`.trim();
+CMD ["java", "-jar", "app.jar"]`;
 
     case 'go':
-      return `
-FROM golang:1.22-alpine AS build
+      return `FROM golang:1.22-alpine AS build
 RUN apk add --no-cache curl
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 RUN go build -o server .
-
 FROM alpine:latest
 RUN apk add --no-cache curl ca-certificates
 WORKDIR /app
 COPY --from=build /app/server .
 EXPOSE ${port}
-CMD ["./server"]
-`.trim();
+CMD ["./server"]`;
 
     case 'ruby':
-      return `
-FROM ruby:3.3-alpine
+      return `FROM ruby:3.3-alpine
 RUN apk add --no-cache curl build-base
 WORKDIR /app
 COPY Gemfile Gemfile.lock ./
 RUN bundle install
 COPY . .
 EXPOSE ${port}
-CMD ["ruby", "app.rb"]
-`.trim();
+CMD ["ruby", "app.rb"]`;
 
     default:
-      throw new Error('Could not detect project type. Supported: Node (npm/pnpm/yarn/bun), Python (pip/poetry), Java (Maven/Gradle), Go, Ruby.');
+      throw new Error(
+        'Could not detect project type. ' +
+        'Supported: Node (npm/pnpm/yarn/bun), Python (pip/poetry), ' +
+        'Java (Maven/Gradle), Go, Ruby.'
+      );
   }
 }
 
@@ -230,8 +212,125 @@ function podmanRequest(
   });
 }
 
+// ── Build via Podman REST API (no CLI needed inside container) ─────────────
+
+/**
+ * Builds a container image by sending the build context as a tar stream
+ * directly to the Podman socket REST API.
+ *
+ * This approach requires ZERO external binaries (no podman CLI, no buildah)
+ * inside the controller container — it talks directly to the host Podman
+ * daemon via the Unix socket that is already mounted.
+ *
+ * The build output is streamed line-by-line to the fastify logger so you
+ * can follow progress in `podman logs paas-controller -f`.
+ */
+async function buildImageViaSock(imageName: string, buildPath: string): Promise<void> {
+  fastify.log.info(`Tarballing build context at ${buildPath}...`);
+
+  // Create a tar of the build directory. We use the host's tar (via execFile)
+  // to produce a deterministic archive and pipe it to the socket.
+  const tarPath = path.join(BUILDS_DIR, `${path.basename(buildPath)}.tar`);
+  await execFileAsync('tar', [
+    '-C', buildPath,
+    '--exclude=.git',
+    '--exclude=node_modules',
+    '--exclude=.next',
+    '--exclude=dist',
+    '-cf', tarPath,
+    '.'
+  ]);
+
+  fastify.log.info(`Sending build context to Podman socket for image ${imageName}...`);
+
+  const encodedTag = encodeURIComponent(imageName);
+  const apiPath = `/v4.0.0/libpod/build?t=${encodedTag}&dockerfile=Dockerfile&networkmode=host`;
+
+  return new Promise((resolve, reject) => {
+    const tarBuffer = fs.readFileSync(tarPath);
+
+    const options: RequestOptions = {
+      socketPath: PODMAN_SOCK,
+      path: apiPath,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-tar',
+        'Content-Length': tarBuffer.length,
+      },
+    };
+
+    const req = httpRequest(options, (res) => {
+      if (res.statusCode !== 200) {
+        let errBody = '';
+        res.on('data', (chunk) => (errBody += chunk));
+        res.on('end', () => {
+          try { fs.unlinkSync(tarPath); } catch { }
+          reject(new Error(`Build API returned ${res.statusCode}: ${errBody}`));
+        });
+        return;
+      }
+
+      // The build API streams NDJSON lines with {"stream":"..."} or {"error":"..."}
+      let buffer = '';
+      let buildFailed = false;
+      let buildError = '';
+
+      res.on('data', (chunk: Buffer) => {
+        buffer += chunk.toString();
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const parsed = JSON.parse(line) as { stream?: string; error?: string; errorDetail?: { message: string } };
+            if (parsed.stream) {
+              process.stdout.write(parsed.stream);
+            }
+            if (parsed.error) {
+              buildFailed = true;
+              buildError = parsed.error;
+              fastify.log.error(`Build error: ${parsed.error}`);
+            }
+          } catch {
+            fastify.log.debug(`Build output: ${line}`);
+          }
+        }
+      });
+
+      res.on('end', () => {
+        try { fs.unlinkSync(tarPath); } catch { }
+        if (buildFailed) {
+          reject(new Error(`Image build failed: ${buildError}`));
+        } else {
+          fastify.log.info(`Image ${imageName} built successfully.`);
+          resolve();
+        }
+      });
+
+      res.on('error', (err) => {
+        try { fs.unlinkSync(tarPath); } catch { }
+        reject(err);
+      });
+    });
+
+    req.on('error', (err) => {
+      try { fs.unlinkSync(tarPath); } catch { }
+      reject(err);
+    });
+
+    req.write(tarBuffer);
+    req.end();
+  });
+}
+
+// ── Container lifecycle ────────────────────────────────────────────────────
+
 async function containerExists(name: string): Promise<boolean> {
-  const { status } = await podmanRequest('GET', `/v4.0.0/libpod/containers/${name}/json`);
+  const { status } = await podmanRequest(
+    'GET',
+    `/v4.0.0/libpod/containers/${name}/json`
+  );
   return status === 200;
 }
 
@@ -249,7 +348,7 @@ async function startContainer(app: AppConfig, imageName: string): Promise<void> 
   const body = {
     name: app.name,
     image: imageName,
-    env: Object.entries(app.env ?? {}).map(([k, v]) => `${k}=${v}`),
+    env: app.env ?? {},
     networks: { 'proxy-net': {} },
     labels: {
       'traefik.enable': 'true',
@@ -266,18 +365,27 @@ async function startContainer(app: AppConfig, imageName: string): Promise<void> 
       retries: 3,
       start_period: 30_000_000_000,
     },
-    restart_policy: { name: 'always' },
+    restart_policy: 'always',
     mounts: (app.volumes ?? []).map((v) => {
       const [src, dst, ...opts] = v.split(':');
       return { type: 'bind', source: src, destination: dst, options: opts };
     }),
   };
 
-  const { status, data } = await podmanRequest('POST', '/v4.0.0/libpod/containers/create', body);
-  if (status !== 201) throw new Error(`Failed to create container: ${JSON.stringify(data)}`);
+  const { status, data } = await podmanRequest(
+    'POST',
+    '/v4.0.0/libpod/containers/create',
+    body
+  );
+  if (status !== 201)
+    throw new Error(`Failed to create container: ${JSON.stringify(data)}`);
 
-  const { status: s, data: d } = await podmanRequest('POST', `/v4.0.0/libpod/containers/${app.name}/start`);
-  if (s !== 204) throw new Error(`Failed to start container: ${JSON.stringify(d)}`);
+  const { status: s, data: d } = await podmanRequest(
+    'POST',
+    `/v4.0.0/libpod/containers/${app.name}/start`
+  );
+  if (s !== 204)
+    throw new Error(`Failed to start container: ${JSON.stringify(d)}`);
 
   fastify.log.info(`Container ${app.name} started.`);
 }
@@ -287,16 +395,16 @@ async function startContainer(app: AppConfig, imageName: string): Promise<void> 
 function buildCloneUrl(app: AppConfig): string {
   if (!app.private) return app.repo;
   const token = app.github_token || process.env.GITHUB_TOKEN || '';
-  if (!token) throw new Error(`App "${app.name}" is private but no token is set`);
+  if (!token)
+    throw new Error(`App "${app.name}" is private but no token is set`);
   return app.repo.replace('https://', `https://${token}@`);
 }
 
 async function cloneOrPull(app: AppConfig, buildPath: string): Promise<void> {
   const cloneUrl = buildCloneUrl(app);
-  const git = simpleGit();
   if (!fs.existsSync(buildPath)) {
     fastify.log.info(`Cloning ${app.repo}...`);
-    await git.clone(cloneUrl, buildPath);
+    await simpleGit().clone(cloneUrl, buildPath);
   } else {
     fastify.log.info(`Pulling latest for ${app.name}...`);
     await simpleGit(buildPath).remote(['set-url', 'origin', cloneUrl]);
@@ -307,38 +415,46 @@ async function cloneOrPull(app: AppConfig, buildPath: string): Promise<void> {
 // ── Quadlet writer ─────────────────────────────────────────────────────────
 
 function writeQuadlet(app: AppConfig, imageName: string): void {
-  const content = `\
-[Unit]
-Description=PaaS App ${app.name}
-After=network-online.target
+  const envLines = Object.entries(app.env ?? {})
+    .map(([k, v]) => `Environment=${k}=${v}`)
+    .join('\n');
 
-[Container]
-Image=${imageName}
-ContainerName=${app.name}
-Network=proxy-net
-${(app.volumes ?? []).map(v => `Volume=${v}`).join('\n')}
-${Object.entries(app.env ?? {}).map(([k, v]) => `Environment=${k}=${v}`).join('\n')}
+  const volumeLines = (app.volumes ?? [])
+    .map((v) => `Volume=${v}`)
+    .join('\n');
 
-HealthCmd=curl -f http://localhost:${app.port}/health || exit 1
-HealthInterval=10s
-HealthRetries=3
-HealthTimeout=5s
-HealthStartPeriod=30s
-
-Label=traefik.enable=true
-Label=traefik.http.routers.${app.name}.rule=Host(\`${app.domain}\`)
-Label=traefik.http.routers.${app.name}.entrypoints=websecure
-Label=traefik.http.routers.${app.name}.tls.certresolver=letsencrypt
-Label=traefik.http.services.${app.name}.loadbalancer.server.port=${app.port}
-Label=traefik.http.services.${app.name}.loadbalancer.healthcheck.path=/health
-
-[Service]
-Restart=always
-RestartSec=5s
-
-[Install]
-WantedBy=default.target
-`.trim();
+  const content = [
+    `[Unit]`,
+    `Description=PaaS App ${app.name}`,
+    `After=network-online.target`,
+    ``,
+    `[Container]`,
+    `Image=${imageName}`,
+    `ContainerName=${app.name}`,
+    `Network=proxy-net`,
+    volumeLines,
+    envLines,
+    ``,
+    `HealthCmd=curl -f http://localhost:${app.port}/health || exit 1`,
+    `HealthInterval=10s`,
+    `HealthRetries=3`,
+    `HealthTimeout=5s`,
+    `HealthStartPeriod=30s`,
+    ``,
+    `Label=traefik.enable=true`,
+    `Label=traefik.http.routers.${app.name}.rule=Host(\`${app.domain}\`)`,
+    `Label=traefik.http.routers.${app.name}.entrypoints=websecure`,
+    `Label=traefik.http.routers.${app.name}.tls.certresolver=letsencrypt`,
+    `Label=traefik.http.services.${app.name}.loadbalancer.server.port=${app.port}`,
+    `Label=traefik.http.services.${app.name}.loadbalancer.healthcheck.path=/health`,
+    ``,
+    `[Service]`,
+    `Restart=always`,
+    `RestartSec=5s`,
+    ``,
+    `[Install]`,
+    `WantedBy=default.target`,
+  ].join('\n').trim();
 
   fs.writeFileSync(path.join(QUADLET_DIR, `${app.name}.container`), content);
   fastify.log.info(`Quadlet written for ${app.name}`);
@@ -359,37 +475,37 @@ function verifySignature(payload: string, signature: string): boolean {
 // ── Deploy logic ───────────────────────────────────────────────────────────
 
 async function triggerDeploy(app: AppConfig): Promise<void> {
+  const buildPath = path.join(BUILDS_DIR, app.name);
+  let generatedDockerfile = false;
+  const dockerfilePath = path.join(buildPath, 'Dockerfile');
+
   try {
     fastify.log.info(`Starting deploy for ${app.name}...`);
 
-    const buildPath = path.join(BUILDS_DIR, app.name);
     await cloneOrPull(app, buildPath);
 
-    const commitHash = execSync('git rev-parse --short HEAD', { cwd: buildPath }).toString().trim();
+    const commitHash = execSync('git rev-parse --short HEAD', {
+      cwd: buildPath,
+    }).toString().trim();
+
     const imageName = `localhost/${app.name}:${commitHash}`;
 
-    // Si ya existe Dockerfile en el repo lo usa, si no genera uno automaticamente
-    const dockerfilePath = path.join(buildPath, 'Dockerfile');
     if (!fs.existsSync(dockerfilePath)) {
       const type = detectProject(buildPath);
       fastify.log.info(`Detected project type: ${type}`);
       const dockerfile = generateDockerfile(type, app.port);
       fs.writeFileSync(dockerfilePath, dockerfile);
+      generatedDockerfile = true;
       fastify.log.info(`Generated Dockerfile for ${type}`);
     } else {
       fastify.log.info(`Using existing Dockerfile`);
     }
 
-    fastify.log.info(`Building image: ${imageName}`);
-    execSync(
-      `buildah build --isolation=chroot -t ${imageName} .`,
-      { cwd: buildPath, stdio: 'inherit' }
-    );
+    // Build image via Podman REST API — zero external binaries needed
+    await buildImageViaSock(imageName, buildPath);
 
-    // Limpia el Dockerfile generado para no ensuciarlo repo
-    const generatedDockerfile = path.join(buildPath, 'Dockerfile');
-    if (fs.existsSync(generatedDockerfile)) {
-      fs.unlinkSync(generatedDockerfile);
+    if (generatedDockerfile && fs.existsSync(dockerfilePath)) {
+      fs.unlinkSync(dockerfilePath);
     }
 
     writeQuadlet(app, imageName);
@@ -398,8 +514,10 @@ async function triggerDeploy(app: AppConfig): Promise<void> {
 
     fastify.log.info(`Deploy complete: ${app.name} @ ${imageName}`);
   } catch (err) {
-    const error = err as Error;
-    fastify.log.error(`Deploy failed for ${app.name}: ${error.message}`);
+    if (generatedDockerfile && fs.existsSync(dockerfilePath)) {
+      fs.unlinkSync(dockerfilePath);
+    }
+    fastify.log.error(`Deploy failed for ${app.name}: ${(err as Error).message}`);
   }
 }
 
@@ -422,20 +540,22 @@ fastify.post('/deploy/:name', async (request, reply) => {
   const { name } = request.params as { name: string };
   const config: AppConfig[] = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
   const app = config.find((a) => a.name === name);
-  if (!app) return reply.status(404).send({ error: `App "${name}" not found` });
+  if (!app)
+    return reply.status(404).send({ error: `App "${name}" not found` });
   reply.send({ message: 'Deploy started', app: app.name });
   triggerDeploy(app);
 });
 
 fastify.post('/webhook', async (request, reply) => {
   const signature = request.headers['x-hub-signature-256'] as string;
-  if (!signature || !verifySignature(JSON.stringify(request.body), signature)) {
+  if (!signature || !verifySignature(JSON.stringify(request.body), signature))
     return reply.status(401).send({ error: 'Invalid signature' });
-  }
+
   const payload = request.body as { repository: { clone_url: string } };
   const config: AppConfig[] = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
   const app = config.find((a) => a.repo === payload.repository.clone_url);
   if (!app) return reply.send({ message: 'Repo not managed' });
+
   reply.send({ message: 'Deploy started', app: app.name });
   triggerDeploy(app);
 });

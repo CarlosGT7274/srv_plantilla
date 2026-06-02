@@ -1,6 +1,9 @@
 FROM node:22-alpine
 
-RUN apk add --no-cache curl git buildah fuse-overlayfs
+# Solo necesitamos curl (healthcheck) y git (clonar repos).
+# NO necesitamos podman ni buildah — el build de imágenes se hace
+# via la REST API del socket de Podman del host directamente.
+RUN apk add --no-cache curl git tar
 
 WORKDIR /app
 
