@@ -1,5 +1,5 @@
 ---
-- name: Install Node.js 22 and Build tools
+- name: Install build tools on host
   dnf:
     name:
       - nodejs
@@ -21,7 +21,7 @@
     creates: /usr/local/bin/pack
   become: yes
 
-- name: Sync Controller source
+- name: Sync Controller source (including Dockerfile)
   synchronize:
     src: "../../../../controller/"
     dest: "{{ controller_dir }}/"
@@ -30,8 +30,10 @@
     rsync_opts:
       - "--exclude=node_modules"
       - "--exclude=dist"
+      - "--exclude=builds"
+      - "--exclude=config"
 
-- name: Create Controller directories
+- name: Create controller directories
   file:
     path: "{{ item }}"
     state: directory
@@ -40,25 +42,10 @@
     mode: '0755'
   loop:
     - "{{ controller_dir }}"
-    - "{{ controller_dir }}/src"
     - "{{ controller_dir }}/builds"
     - "{{ controller_dir }}/config"
 
-- name: Install Controller dependencies
-  npm:
-    path: "{{ controller_dir }}"
-    state: present
-  become: yes
-  become_user: "{{ deploy_user }}"
-
-- name: Build Controller
-  command: npm run build
-  args:
-    chdir: "{{ controller_dir }}"
-  become: yes
-  become_user: "{{ deploy_user }}"
-
-- name: Template Controller configuration
+- name: Template Controller app config
   template:
     src: config.json.j2
     dest: "{{ controller_dir }}/config/apps.json"
@@ -66,16 +53,31 @@
     group: "{{ deploy_user }}"
     mode: '0644'
 
-- name: Deploy Controller Service
+- name: Build paas-controller image with Podman
+  command: >
+    podman build
+    -t localhost/paas-controller:latest
+    {{ controller_dir }}
+  become: yes
+  become_user: "{{ deploy_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ deploy_user_info.uid }}"
+
+- name: Remove old controller.service if exists (migrating to Quadlet)
+  file:
+    path: "/home/{{ deploy_user }}/.config/systemd/user/paas-controller.service"
+    state: absent
+
+- name: Deploy Controller Quadlet
   template:
-    src: controller.service.j2
-    dest: "/home/{{ deploy_user }}/.config/systemd/user/paas-controller.service"
+    src: controller.container.j2
+    dest: "/home/{{ deploy_user }}/.config/containers/systemd/paas-controller.container"
     owner: "{{ deploy_user }}"
     group: "{{ deploy_user }}"
     mode: '0644'
   notify: Reload systemd user
 
-- name: Flush handlers to reload systemd
+- name: Flush handlers
   meta: flush_handlers
 
 - name: Ensure Controller is started and enabled

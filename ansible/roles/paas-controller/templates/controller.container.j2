@@ -1,0 +1,40 @@
+[Unit]
+Description=PaaS Deploy Controller
+After=network-online.target
+
+[Container]
+Image=localhost/paas-controller:latest
+ContainerName=paas-controller
+Network=proxy-net
+
+# Podman socket so the controller can manage other containers via API
+Volume=/run/user/{{ deploy_user_info.uid }}/podman/podman.sock:/run/user/{{ deploy_user_info.uid }}/podman/podman.sock:rw,z
+
+# Persistent data
+Volume={{ controller_dir }}/builds:/app/builds:z
+Volume={{ controller_dir }}/config:/app/config:z
+
+# Quadlet dir so the controller can write .container files for persistence/reboots
+Volume=/home/{{ deploy_user }}/.config/containers/systemd:/quadlets:z
+
+Environment=PORT={{ controller_port }}
+Environment=GITHUB_SECRET={{ controller_github_secret }}
+Environment=CONFIG_PATH=/app/config/apps.json
+Environment=BUILDS_DIR=/app/builds
+Environment=QUADLET_DIR=/quadlets
+Environment=CONTAINER_HOST=unix:///run/user/{{ deploy_user_info.uid }}/podman/podman.sock
+
+# Traefik autodiscovery via labels
+Label=traefik.enable=true
+Label=traefik.http.routers.paas-controller.rule=Host(`{{ controller_domain }}`)
+Label=traefik.http.routers.paas-controller.entrypoints=websecure
+Label=traefik.http.routers.paas-controller.tls.certresolver=letsencrypt
+Label=traefik.http.services.paas-controller.loadbalancer.server.port={{ controller_port }}
+Label=traefik.http.services.paas-controller.loadbalancer.healthcheck.path=/health
+
+[Service]
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=default.target

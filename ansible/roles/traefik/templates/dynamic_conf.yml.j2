@@ -34,17 +34,3 @@ http:
         - internal-auth
       tls:
         certResolver: letsencrypt
-
-    paas-controller:
-      rule: Host(`deploy.{{ main_domain }}`)
-      service: paas-controller
-      entryPoints:
-        - websecure
-      tls:
-        certResolver: letsencrypt
-
-  services:
-    paas-controller:
-      loadBalancer:
-        servers:
-          - url: "http://{{ proxy_net_gateway.stdout }}:3000"
