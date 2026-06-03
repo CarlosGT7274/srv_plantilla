@@ -212,24 +212,11 @@ function podmanRequest(
   });
 }
 
-// ── Build via Podman REST API (no CLI needed inside container) ─────────────
+// ── Build via Podman REST API ──────────────────────────────────────────────
 
-/**
- * Builds a container image by sending the build context as a tar stream
- * directly to the Podman socket REST API.
- *
- * This approach requires ZERO external binaries (no podman CLI, no buildah)
- * inside the controller container — it talks directly to the host Podman
- * daemon via the Unix socket that is already mounted.
- *
- * The build output is streamed line-by-line to the fastify logger so you
- * can follow progress in `podman logs paas-controller -f`.
- */
 async function buildImageViaSock(imageName: string, buildPath: string): Promise<void> {
   fastify.log.info(`Tarballing build context at ${buildPath}...`);
 
-  // Create a tar of the build directory. We use the host's tar (via execFile)
-  // to produce a deterministic archive and pipe it to the socket.
   const tarPath = path.join(BUILDS_DIR, `${path.basename(buildPath)}.tar`);
   await execFileAsync('tar', [
     '-C', buildPath,
@@ -244,7 +231,9 @@ async function buildImageViaSock(imageName: string, buildPath: string): Promise<
   fastify.log.info(`Sending build context to Podman socket for image ${imageName}...`);
 
   const encodedTag = encodeURIComponent(imageName);
-  const apiPath = `/v4.0.0/libpod/build?t=${encodedTag}&dockerfile=Dockerfile&networkmode=host`;
+  // Sin networkmode=host — el build no necesita acceder a proxy-net,
+  // solo necesita internet para descargar dependencias (slirp4netns lo maneja)
+  const apiPath = `/v5.0.0/libpod/build?t=${encodedTag}&dockerfile=Dockerfile`;
 
   return new Promise((resolve, reject) => {
     const tarBuffer = fs.readFileSync(tarPath);
@@ -270,7 +259,6 @@ async function buildImageViaSock(imageName: string, buildPath: string): Promise<
         return;
       }
 
-      // The build API streams NDJSON lines with {"stream":"..."} or {"error":"..."}
       let buffer = '';
       let buildFailed = false;
       let buildError = '';
@@ -283,10 +271,12 @@ async function buildImageViaSock(imageName: string, buildPath: string): Promise<
         for (const line of lines) {
           if (!line.trim()) continue;
           try {
-            const parsed = JSON.parse(line) as { stream?: string; error?: string; errorDetail?: { message: string } };
-            if (parsed.stream) {
-              process.stdout.write(parsed.stream);
-            }
+            const parsed = JSON.parse(line) as {
+              stream?: string;
+              error?: string;
+              errorDetail?: { message: string };
+            };
+            if (parsed.stream) process.stdout.write(parsed.stream);
             if (parsed.error) {
               buildFailed = true;
               buildError = parsed.error;
@@ -329,7 +319,7 @@ async function buildImageViaSock(imageName: string, buildPath: string): Promise<
 async function containerExists(name: string): Promise<boolean> {
   const { status } = await podmanRequest(
     'GET',
-    `/v4.0.0/libpod/containers/${name}/json`
+    `/v5.0.0/libpod/containers/${name}/json`
   );
   return status === 200;
 }
@@ -337,9 +327,9 @@ async function containerExists(name: string): Promise<boolean> {
 async function stopAndRemoveContainer(name: string): Promise<void> {
   if (!(await containerExists(name))) return;
   fastify.log.info(`Stopping container ${name}...`);
-  await podmanRequest('POST', `/v4.0.0/libpod/containers/${name}/stop`);
+  await podmanRequest('POST', `/v5.0.0/libpod/containers/${name}/stop`);
   fastify.log.info(`Removing container ${name}...`);
-  await podmanRequest('DELETE', `/v4.0.0/libpod/containers/${name}?force=true`);
+  await podmanRequest('DELETE', `/v5.0.0/libpod/containers/${name}?force=true`);
 }
 
 async function startContainer(app: AppConfig, imageName: string): Promise<void> {
@@ -349,7 +339,11 @@ async function startContainer(app: AppConfig, imageName: string): Promise<void> 
     name: app.name,
     image: imageName,
     env: app.env ?? {},
-    networks: { 'proxy-net': {} },
+    Networks: {
+      'proxy-net': {
+        aliases: [app.name],
+      },
+    },
     labels: {
       'traefik.enable': 'true',
       [`traefik.http.routers.${app.name}.rule`]: `Host(\`${app.domain}\`)`,
@@ -365,6 +359,7 @@ async function startContainer(app: AppConfig, imageName: string): Promise<void> 
       retries: 3,
       start_period: 30_000_000_000,
     },
+    netns: { nsmode: 'bridge' },
     restart_policy: 'always',
     mounts: (app.volumes ?? []).map((v) => {
       const [src, dst, ...opts] = v.split(':');
@@ -372,20 +367,26 @@ async function startContainer(app: AppConfig, imageName: string): Promise<void> 
     }),
   };
 
+
+
   const { status, data } = await podmanRequest(
     'POST',
-    '/v4.0.0/libpod/containers/create',
+    '/v5.0.0/libpod/containers/create',
     body
   );
-  if (status !== 201)
+
+  if (status !== 201) {
     throw new Error(`Failed to create container: ${JSON.stringify(data)}`);
+  }
 
   const { status: s, data: d } = await podmanRequest(
     'POST',
-    `/v4.0.0/libpod/containers/${app.name}/start`
+    `/v5.0.0/libpod/containers/${app.name}/start`
   );
-  if (s !== 204)
+
+  if (s !== 204) {
     throw new Error(`Failed to start container: ${JSON.stringify(d)}`);
+  }
 
   fastify.log.info(`Container ${app.name} started.`);
 }
@@ -454,7 +455,7 @@ function writeQuadlet(app: AppConfig, imageName: string): void {
     ``,
     `[Install]`,
     `WantedBy=default.target`,
-  ].join('\n').trim();
+  ].filter(line => line !== undefined).join('\n').trim();
 
   fs.writeFileSync(path.join(QUADLET_DIR, `${app.name}.container`), content);
   fastify.log.info(`Quadlet written for ${app.name}`);
@@ -501,7 +502,6 @@ async function triggerDeploy(app: AppConfig): Promise<void> {
       fastify.log.info(`Using existing Dockerfile`);
     }
 
-    // Build image via Podman REST API — zero external binaries needed
     await buildImageViaSock(imageName, buildPath);
 
     if (generatedDockerfile && fs.existsSync(dockerfilePath)) {

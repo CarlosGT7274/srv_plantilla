@@ -6,12 +6,11 @@ After=network-online.target
 Image={{ item.image }}
 ContainerName={{ item.name }}
 Network=proxy-net
-Volume={{ databases_dir }}/{{ item.name }}:/var/lib/{{ item.type }}/data:z
+Volume={{ databases_dir }}/{{ item.name }}:/var/lib/mysql:z
 {% for key, value in (item.env | default({})).items() %}
 Environment={{ key }}={{ value }}
 {% endfor %}
 
-# Traefik TCP Labels for External Access
 {% if item.external_access | default(false) %}
 Label=traefik.enable=true
 Label=traefik.tcp.routers.{{ item.name }}.entrypoints={{ item.type }}

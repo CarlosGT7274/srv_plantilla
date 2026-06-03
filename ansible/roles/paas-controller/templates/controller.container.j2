@@ -35,6 +35,7 @@ Label=traefik.http.services.paas-controller.loadbalancer.healthcheck.path=/healt
 [Service]
 Restart=always
 RestartSec=5s
+WorkingDirectory=/home/{{ deploy_user }}
 
 [Install]
 WantedBy=default.target

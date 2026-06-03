@@ -24,6 +24,9 @@
   loop: "{{ managed_databases }}"
   notify: Reload systemd user
 
+- name: Flush handlers to reload systemd
+  meta: flush_handlers
+
 - name: Ensure databases are started and enabled
   systemd:
     name: "{{ item.name }}"
@@ -34,6 +37,7 @@
   become_user: "{{ deploy_user }}"
   environment:
     XDG_RUNTIME_DIR: "/run/user/{{ deploy_user_info.uid }}"
+    DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ deploy_user_info.uid }}/bus"
   loop: "{{ managed_databases }}"
 
 - name: Configure firewalld for database access
