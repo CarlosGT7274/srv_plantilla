@@ -20,6 +20,15 @@ const PODMAN_SOCK = process.env.CONTAINER_HOST?.replace('unix://', '') ||
 
 const fastify = Fastify({ logger: true });
 
+const BUILD_TIME_PATTERNS = [
+  /^NEXT_PUBLIC_/,
+  /^VITE_/,
+  /^REACT_APP_/,
+  /^NUXT_PUBLIC_/,
+  /^PUBLIC_/,
+  /^GATSBY_/,
+];
+
 interface AppConfig {
   name: string;
   repo: string;
@@ -31,13 +40,27 @@ interface AppConfig {
   volumes?: string[];
 }
 
-// ── Project type detection ─────────────────────────────────────────────────
-
 type ProjectType =
   | 'node-npm' | 'node-pnpm' | 'node-yarn' | 'node-bun'
   | 'python-pip' | 'python-poetry'
   | 'java-maven' | 'java-gradle'
   | 'go' | 'ruby' | 'unknown';
+
+function splitEnvVars(env: Record<string, string>): {
+  buildEnv: Record<string, string>;
+  runtimeEnv: Record<string, string>;
+} {
+  const buildEnv: Record<string, string> = {};
+  const runtimeEnv: Record<string, string> = {};
+  for (const [k, v] of Object.entries(env)) {
+    if (BUILD_TIME_PATTERNS.some(p => p.test(k))) {
+      buildEnv[k] = v;
+    } else {
+      runtimeEnv[k] = v;
+    }
+  }
+  return { buildEnv, runtimeEnv };
+}
 
 function detectProject(buildPath: string): ProjectType {
   const has = (f: string) => fs.existsSync(path.join(buildPath, f));
@@ -175,8 +198,6 @@ CMD ["ruby", "app.rb"]`;
   }
 }
 
-// ── Podman socket helpers ──────────────────────────────────────────────────
-
 function podmanRequest(
   method: string,
   urlPath: string,
@@ -212,28 +233,48 @@ function podmanRequest(
   });
 }
 
-// ── Build via Podman REST API ──────────────────────────────────────────────
-
-async function buildImageViaSock(imageName: string, buildPath: string): Promise<void> {
-  fastify.log.info(`Tarballing build context at ${buildPath}...`);
-
+async function buildImageViaSock(app: AppConfig, imageName: string, buildPath: string): Promise<void> {
+  const { buildEnv } = splitEnvVars(app.env ?? {});
+  const dockerfilePath = path.join(buildPath, 'Dockerfile');
   const tarPath = path.join(BUILDS_DIR, `${path.basename(buildPath)}.tar`);
-  await execFileAsync('tar', [
-    '-C', buildPath,
-    '--exclude=.git',
-    '--exclude=node_modules',
-    '--exclude=.next',
-    '--exclude=dist',
-    '-cf', tarPath,
-    '.'
-  ]);
+  let originalDockerfile: string | null = null;
+
+  try {
+    if (Object.keys(buildEnv).length > 0 && fs.existsSync(dockerfilePath)) {
+      originalDockerfile = fs.readFileSync(dockerfilePath, 'utf-8');
+      const argBlock = Object.keys(buildEnv)
+        .map(k => `ARG ${k}\nENV ${k}=$${k}`)
+        .join('\n');
+      const patched = originalDockerfile.replace(
+        /^(FROM\s+\S[^\n]*)$/m,
+        `$1\n${argBlock}`
+      );
+      fs.writeFileSync(dockerfilePath, patched);
+    }
+
+    fastify.log.info(`Tarballing build context at ${buildPath}...`);
+    await execFileAsync('tar', [
+      '-C', buildPath,
+      '--exclude=.git',
+      '--exclude=node_modules',
+      '--exclude=.next',
+      '--exclude=dist',
+      '-cf', tarPath,
+      '.'
+    ]);
+  } finally {
+    if (originalDockerfile !== null) {
+      fs.writeFileSync(dockerfilePath, originalDockerfile);
+    }
+  }
 
   fastify.log.info(`Sending build context to Podman socket for image ${imageName}...`);
 
   const encodedTag = encodeURIComponent(imageName);
-  // Sin networkmode=host — el build no necesita acceder a proxy-net,
-  // solo necesita internet para descargar dependencias (slirp4netns lo maneja)
-  const apiPath = `/v5.0.0/libpod/build?t=${encodedTag}&dockerfile=Dockerfile`;
+  const buildArgsParam = encodeURIComponent(JSON.stringify(buildEnv));
+  const apiPath = Object.keys(buildEnv).length > 0
+    ? `/v5.0.0/libpod/build?t=${encodedTag}&dockerfile=Dockerfile&buildargs=${buildArgsParam}`
+    : `/v5.0.0/libpod/build?t=${encodedTag}&dockerfile=Dockerfile`;
 
   return new Promise((resolve, reject) => {
     const tarBuffer = fs.readFileSync(tarPath);
@@ -314,8 +355,6 @@ async function buildImageViaSock(imageName: string, buildPath: string): Promise<
   });
 }
 
-// ── Container lifecycle ────────────────────────────────────────────────────
-
 async function containerExists(name: string): Promise<boolean> {
   const { status } = await podmanRequest(
     'GET',
@@ -335,10 +374,12 @@ async function stopAndRemoveContainer(name: string): Promise<void> {
 async function startContainer(app: AppConfig, imageName: string): Promise<void> {
   fastify.log.info(`Creating container ${app.name} from ${imageName}...`);
 
+  const { runtimeEnv } = splitEnvVars(app.env ?? {});
+
   const body = {
     name: app.name,
     image: imageName,
-    env: app.env ?? {},
+    env: runtimeEnv,
     Networks: {
       'proxy-net': {
         aliases: [app.name],
@@ -367,8 +408,6 @@ async function startContainer(app: AppConfig, imageName: string): Promise<void> 
     }),
   };
 
-
-
   const { status, data } = await podmanRequest(
     'POST',
     '/v5.0.0/libpod/containers/create',
@@ -391,8 +430,6 @@ async function startContainer(app: AppConfig, imageName: string): Promise<void> 
   fastify.log.info(`Container ${app.name} started.`);
 }
 
-// ── Clone / pull ───────────────────────────────────────────────────────────
-
 function buildCloneUrl(app: AppConfig): string {
   if (!app.private) return app.repo;
   const token = app.github_token || process.env.GITHUB_TOKEN || '';
@@ -413,10 +450,10 @@ async function cloneOrPull(app: AppConfig, buildPath: string): Promise<void> {
   }
 }
 
-// ── Quadlet writer ─────────────────────────────────────────────────────────
-
 function writeQuadlet(app: AppConfig, imageName: string): void {
-  const envLines = Object.entries(app.env ?? {})
+  const { runtimeEnv } = splitEnvVars(app.env ?? {});
+
+  const envLines = Object.entries(runtimeEnv)
     .map(([k, v]) => `Environment=${k}=${v}`)
     .join('\n');
 
@@ -461,8 +498,6 @@ function writeQuadlet(app: AppConfig, imageName: string): void {
   fastify.log.info(`Quadlet written for ${app.name}`);
 }
 
-// ── Signature verification ─────────────────────────────────────────────────
-
 function verifySignature(payload: string, signature: string): boolean {
   const hmac = crypto.createHmac('sha256', GITHUB_SECRET);
   const digest = 'sha256=' + hmac.update(payload).digest('hex');
@@ -472,8 +507,6 @@ function verifySignature(payload: string, signature: string): boolean {
     return false;
   }
 }
-
-// ── Deploy logic ───────────────────────────────────────────────────────────
 
 async function triggerDeploy(app: AppConfig): Promise<void> {
   const buildPath = path.join(BUILDS_DIR, app.name);
@@ -502,7 +535,7 @@ async function triggerDeploy(app: AppConfig): Promise<void> {
       fastify.log.info(`Using existing Dockerfile`);
     }
 
-    await buildImageViaSock(imageName, buildPath);
+    await buildImageViaSock(app, imageName, buildPath);
 
     if (generatedDockerfile && fs.existsSync(dockerfilePath)) {
       fs.unlinkSync(dockerfilePath);
@@ -520,8 +553,6 @@ async function triggerDeploy(app: AppConfig): Promise<void> {
     fastify.log.error(`Deploy failed for ${app.name}: ${(err as Error).message}`);
   }
 }
-
-// ── Routes ─────────────────────────────────────────────────────────────────
 
 fastify.get('/health', async () => ({ status: 'ok' }));
 
@@ -559,8 +590,6 @@ fastify.post('/webhook', async (request, reply) => {
   reply.send({ message: 'Deploy started', app: app.name });
   triggerDeploy(app);
 });
-
-// ── Start ──────────────────────────────────────────────────────────────────
 
 fastify.listen({ port: PORT, host: '0.0.0.0' }).catch((err) => {
   fastify.log.error(err);
