@@ -1,5 +1,4 @@
 ---
-# ansible/roles/podman/tasks/main.yml
 - name: Install Podman and related tools
   dnf:
     name:
@@ -8,6 +7,7 @@
       - buildah
       - slirp4netns
       - fuse-overlayfs
+      - policycoreutils-python-utils
     state: present
 
 - name: Get deploy user info
@@ -35,6 +35,18 @@
     owner: "{{ deploy_user }}"
     group: "{{ deploy_user }}"
     mode: '0755'
+
+- name: Set permanent SELinux fcontext for quadlet directory
+  community.general.sefcontext:
+    target: '/home/{{ deploy_user }}/.config/containers/systemd(/.*)?'
+    setype: container_file_t
+    state: present
+  when: ansible_selinux.status == 'enabled'
+
+- name: Apply SELinux fcontext to quadlet directory
+  command: restorecon -Rv /home/{{ deploy_user }}/.config/containers/systemd/
+  when: ansible_selinux.status == 'enabled'
+  changed_when: false
 
 - name: Ensure podman socket is started and enabled for deploy user
   systemd:

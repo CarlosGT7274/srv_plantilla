@@ -84,7 +84,7 @@
   systemd:
     name: paas-controller.service
     scope: user
-    state: started
+    state: restarted
     enabled: yes
     daemon_reload: yes
   become: yes

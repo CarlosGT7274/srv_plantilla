@@ -7,8 +7,6 @@ import { PODMAN_SOCK, podmanRequest, stopAndRemoveContainer } from './podman.js'
 const QUADLET_DIR = process.env.QUADLET_DIR || '/quadlets';
 const DATABASES_DIR = process.env.DATABASES_DIR || '/home/deploy/databases';
 
-// ─── Tipos internos ───────────────────────────────────────────────────────────
-
 export interface DatabaseInput {
   name: string;
   type: DatabaseType;
@@ -21,7 +19,7 @@ export interface DatabaseInput {
 
 interface SecretMount {
   secretName: string;
-  target: string; // env var dentro del contenedor
+  target: string;
 }
 
 interface DbProfile {
@@ -35,8 +33,6 @@ interface DbProfile {
     connectionString: string;
   };
 }
-
-// ─── Perfiles ─────────────────────────────────────────────────────────────────
 
 const DB_PROFILES: Record<DatabaseType, DbProfile> = {
   mysql: {
@@ -91,7 +87,13 @@ const DB_PROFILES: Record<DatabaseType, DbProfile> = {
   },
 };
 
-// ─── Podman secrets (raw — acepta Buffer) ─────────────────────────────────────
+// ─── Podman secrets ───────────────────────────────────────────────────────────
+// Podman returns 500 (not 409) when a secret with the same name already exists.
+// We treat both as non-fatal so the flow is idempotent on retries.
+
+async function podmanSecretDelete(name: string): Promise<void> {
+  await podmanRequest('DELETE', `/v5.0.0/libpod/secrets/${name}`);
+}
 
 function podmanSecretCreate(name: string, value: string): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -110,8 +112,9 @@ function podmanSecretCreate(name: string, value: string): Promise<void> {
         let body = '';
         res.on('data', (c) => (body += c));
         res.on('end', () => {
-          // 200/201 = ok, 409 = ya existe (no es error fatal)
           if (res.statusCode === 200 || res.statusCode === 201 || res.statusCode === 409)
+            resolve();
+          else if (res.statusCode === 500 && body.includes('secret name in use'))
             resolve();
           else
             reject(new Error(`Secret create failed ${res.statusCode}: ${body}`));
@@ -124,7 +127,7 @@ function podmanSecretCreate(name: string, value: string): Promise<void> {
   });
 }
 
-// ─── Quadlet (sin credenciales en texto plano) ────────────────────────────────
+// ─── Quadlet ──────────────────────────────────────────────────────────────────
 
 function writeDbQuadlet(
   input: DatabaseInput,
@@ -138,7 +141,6 @@ function writeDbQuadlet(
     .map(([k, v]) => `Environment=${k}=${v}`)
     .join('\n');
 
-  // Credenciales referenciadas por nombre de secret, nunca por valor
   const secretLines = secretMounts
     .map(({ secretName, target }) => `Secret=${secretName},type=env,target=${target}`)
     .join('\n');
@@ -188,22 +190,18 @@ export async function createDatabase(
   const { secrets, secretMounts, nonSecretEnv, connectionString } =
     profile.resolveSecrets(input);
 
-  // 1. Directorio de datos
   log(`Creating data directory at ${hostDataDir}...`);
   fs.mkdirSync(hostDataDir, { recursive: true });
 
-  // 2. Podman secrets — credenciales nunca tocan el disco en texto plano
   log(`Creating Podman secrets for ${input.name}...`);
   for (const [secretName, secretValue] of Object.entries(secrets)) {
     await podmanSecretCreate(secretName, secretValue);
     log(`  Secret "${secretName}" stored.`);
   }
 
-  // 3. Quadlet sin credenciales
   log(`Writing Quadlet for ${input.name}...`);
   writeDbQuadlet(input, profile, secretMounts, nonSecretEnv);
 
-  // 4. Crear contenedor referenciando los secrets
   log(`Starting container ${input.name}...`);
   const body = {
     name: input.name,
@@ -247,7 +245,6 @@ export async function removeDatabase(
   log(`Stopping container ${name}...`);
   await stopAndRemoveContainer(name);
 
-  // Limpiar secrets de Podman
   log(`Removing Podman secrets...`);
   for (const suffix of ['pass', 'root-pass']) {
     const secretName = `${name}-${suffix}`;
@@ -257,7 +254,6 @@ export async function removeDatabase(
     if (status === 204) log(`  Secret "${secretName}" removed.`);
   }
 
-  // Limpiar Quadlet
   const quadletPath = path.join(QUADLET_DIR, `${name}.container`);
   if (fs.existsSync(quadletPath)) {
     fs.unlinkSync(quadletPath);
