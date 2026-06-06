@@ -1,19 +1,40 @@
 global:
   resolve_timeout: 5m
+  smtp_from: '{{ alertmanager_smtp_user }}'
+  smtp_smarthost: 'smtp.gmail.com:587'
+  smtp_auth_username: '{{ alertmanager_smtp_user }}'
+  smtp_auth_password: '{{ alertmanager_smtp_pass }}'
+  smtp_require_tls: true
 
 route:
-  group_by: ['alertname']
-  group_wait: 10s
-  group_interval: 10s
+  group_by: ['alertname', 'severity', 'name']
+  group_wait: 2s
+  group_interval: 5s
   repeat_interval: 1h
-  receiver: 'web.hook'
+  receiver: 'email-alerts'
+
 receivers:
-- name: 'web.hook'
-  webhook_configs:
-  - url: 'http://127.0.0.1:5001/'
-inhibit_rules:
-  - source_match:
-      severity: 'critical'
-    target_match:
-      severity: 'warning'
-    equal: ['alertname', 'dev', 'instance']
+  - name: 'email-alerts'
+    email_configs:
+      - to: '{{ alertmanager_email_to }}'
+        send_resolved: true
+        headers:
+          subject: '[SERVIDOR] {% raw %}{{ .Status | toUpper }}{% endraw %}: {% raw %}{{ .GroupLabels.name }}{% endraw %}'
+        html: |
+          {% raw %}
+          <div style="font-family: Arial, sans-serif; border: 1px solid #eee; padding: 20px;">
+            <h2 style="color: {{ if eq .Status "firing" }}#d32f2f{{ else }}#388e3c{{ end }};">
+              Estado: {{ .Status | toUpper }}
+            </h2>
+            <p>Se ha detectado un evento en el contenedor: <strong>{{ .GroupLabels.name }}</strong></p>
+            <hr />
+            {{ range .Alerts }}
+              <div style="margin-bottom: 15px;">
+                <strong>Alerta:</strong> {{ .Labels.alertname }}<br>
+                <strong>Gravedad:</strong> {{ .Labels.severity }}<br>
+                <strong>Descripción:</strong> {{ .Annotations.description }}<br>
+                <strong>Iniciado:</strong> {{ .StartsAt.Format "15:04:05 02/01/2006" }}
+              </div>
+            {{ end }}
+          </div>
+          {% endraw %}

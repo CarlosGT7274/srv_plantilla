@@ -6,7 +6,15 @@ After=network-online.target
 Image=docker.io/prom/alertmanager:{{ alertmanager_version }}
 ContainerName=alertmanager
 Network=monitoring-net
-Volume={{ monitoring_dir }}/alertmanager:/etc/alertmanager:z
+Network=proxy-net
+Volume={{ monitoring_dir }}/alertmanager:/etc/alertmanager:z,U
+Label=traefik.enable=true
+Label=traefik.docker.network=proxy-net
+Label=traefik.http.routers.alertmanager.rule=Host(`{{ alertmanager_domain }}`)
+Label=traefik.http.routers.alertmanager.entrypoints=websecure
+Label=traefik.http.routers.alertmanager.tls.certresolver=letsencrypt
+Label=traefik.http.routers.alertmanager.middlewares=internal-auth@file
+Label=traefik.http.services.alertmanager.loadbalancer.server.port=9093
 
 [Install]
 WantedBy=default.target

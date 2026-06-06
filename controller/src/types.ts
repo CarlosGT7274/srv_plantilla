@@ -7,6 +7,8 @@ export interface AppConfig {
   github_token?: string;
   env?: Record<string, string>;
   volumes?: string[];
+  health_check?: boolean;
+  health_path?: string;
 }
 
 export type DatabaseType = 'mysql' | 'postgres';

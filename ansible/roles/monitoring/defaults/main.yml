@@ -10,3 +10,11 @@ podman_exporter_version: v1.12.0
 grafana_admin_password: "admin_holden1095" # Volvemos a la pass solicitada
 grafana_domain: "grafana.{{ main_domain }}"
 prometheus_domain: "prometheus.{{ main_domain }}"
+alertmanager_domain: "alerts.{{ main_domain }}"
+
+
+# Alertmanager Email Configuration
+alertmanager_smtp_user: "carlosbt7274@gmail.com"
+alertmanager_smtp_pass: "{{ vault_alertmanager_smtp_pass }}"
+alertmanager_email_to: "carlosbt7274@gmail.com"
+

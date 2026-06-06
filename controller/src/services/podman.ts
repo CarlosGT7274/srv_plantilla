@@ -68,30 +68,29 @@ export async function stopAndRemoveContainer(name: string): Promise<void> {
 
 export async function startAppContainer(
   app: AppConfig,
-  imageName: string
+  imageName: string,
+  healthPath: string | null
 ): Promise<void> {
   const { runtimeEnv } = splitEnvVars(app.env ?? {});
 
-  const body = {
+  const labels: Record<string, string> = {
+    'traefik.enable': 'true',
+    [`traefik.http.routers.${app.name}.rule`]: `Host(\`${app.domain}\`)`,
+    [`traefik.http.routers.${app.name}.entrypoints`]: 'websecure',
+    [`traefik.http.routers.${app.name}.tls.certresolver`]: 'letsencrypt',
+    [`traefik.http.services.${app.name}.loadbalancer.server.port`]: String(app.port),
+  };
+
+  if (healthPath) {
+    labels[`traefik.http.services.${app.name}.loadbalancer.healthcheck.path`] = healthPath;
+  }
+
+  const body: any = {
     name: app.name,
     image: imageName,
     env: runtimeEnv,
     Networks: { 'proxy-net': { aliases: [app.name] } },
-    Labels: {
-      'traefik.enable': 'true',
-      [`traefik.http.routers.${app.name}.rule`]: `Host(\`${app.domain}\`)`,
-      [`traefik.http.routers.${app.name}.entrypoints`]: 'websecure',
-      [`traefik.http.routers.${app.name}.tls.certresolver`]: 'letsencrypt',
-      [`traefik.http.services.${app.name}.loadbalancer.server.port`]: String(app.port),
-      [`traefik.http.services.${app.name}.loadbalancer.healthcheck.path`]: '/health',
-    },
-    healthconfig: {
-      test: ['CMD-SHELL', `curl -f http://localhost:${app.port}/health || exit 1`],
-      interval: 10_000_000_000,
-      timeout: 5_000_000_000,
-      retries: 3,
-      start_period: 30_000_000_000,
-    },
+    Labels: labels,
     netns: { nsmode: 'bridge' },
     restart_policy: 'always',
     mounts: (app.volumes ?? []).map((v) => {
@@ -99,6 +98,16 @@ export async function startAppContainer(
       return { type: 'bind', source: src, destination: dst, options: opts };
     }),
   };
+
+  if (healthPath) {
+    body.healthconfig = {
+      test: ['CMD-SHELL', `curl -f http://localhost:${app.port}${healthPath} || exit 1`],
+      interval: 10_000_000_000,
+      timeout: 5_000_000_000,
+      retries: 3,
+      start_period: 30_000_000_000,
+    };
+  }
 
   const { status, data } = await podmanRequest(
     'POST',
