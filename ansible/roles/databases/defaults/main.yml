@@ -1,11 +1,3 @@
 ---
 databases_dir: "/home/{{ deploy_user }}/databases"
-managed_databases:
-  - name: mysql-vivestay
-    type: mysql
-    image: docker.io/library/mysql:8.0
-    port: 3306
-    external_access: false
-    env:
-      MYSQL_ROOT_PASSWORD: "123"
-      MYSQL_DATABASE: "vivestay"
+managed_databases: []

@@ -1,35 +1,31 @@
 import fs from 'fs';
 import path from 'path';
-import { request as httpRequest } from 'http';
-import { DatabaseConfig, DatabaseType } from '../types.js';
-import { PODMAN_SOCK, podmanRequest, stopAndRemoveContainer } from './podman.js';
+import net from 'net';
+import { DatabaseType } from '../types.js';
+import { podmanRequest, stopAndRemoveContainer, containerExists } from './podman.js';
 
 const QUADLET_DIR = process.env.QUADLET_DIR || '/quadlets';
 const DATABASES_DIR = process.env.DATABASES_DIR || '/home/deploy/databases';
+const HOST_PORT_RANGE_START = 3300;
+const HOST_PORT_RANGE_END = 3400;
 
 export interface DatabaseInput {
   name: string;
   type: DatabaseType;
   port?: number;
+  host_port?: number;
   password?: string;
   database?: string;
   username?: string;
   external_access?: boolean;
 }
 
-interface SecretMount {
-  secretName: string;
-  target: string;
-}
-
 interface DbProfile {
   image: string;
   defaultPort: number;
   dataDir: string;
-  resolveSecrets: (input: DatabaseInput) => {
-    secrets: Record<string, string>;
-    secretMounts: SecretMount[];
-    nonSecretEnv: Record<string, string>;
+  resolveEnv: (input: DatabaseInput) => {
+    env: Record<string, string>;
     connectionString: string;
   };
 }
@@ -39,22 +35,16 @@ const DB_PROFILES: Record<DatabaseType, DbProfile> = {
     image: 'docker.io/library/mysql:8.0',
     defaultPort: 3306,
     dataDir: '/var/lib/mysql',
-    resolveSecrets: (input) => {
+    resolveEnv: (input) => {
       const user = input.username ?? input.name;
       const pass = input.password ?? 'changeme';
       const dbName = input.database ?? input.name;
       const port = input.port ?? 3306;
       return {
-        secrets: {
-          [`${input.name}-root-pass`]: pass,
-          [`${input.name}-pass`]: pass,
-        },
-        secretMounts: [
-          { secretName: `${input.name}-root-pass`, target: 'MYSQL_ROOT_PASSWORD' },
-          { secretName: `${input.name}-pass`, target: 'MYSQL_PASSWORD' },
-        ],
-        nonSecretEnv: {
+        env: {
+          MYSQL_ROOT_PASSWORD: pass,
           MYSQL_USER: user,
+          MYSQL_PASSWORD: pass,
           MYSQL_DATABASE: dbName,
         },
         connectionString: `mysql://${user}:${pass}@${input.name}:${port}/${dbName}`,
@@ -65,20 +55,15 @@ const DB_PROFILES: Record<DatabaseType, DbProfile> = {
     image: 'docker.io/library/postgres:16-alpine',
     defaultPort: 5432,
     dataDir: '/var/lib/postgresql/data',
-    resolveSecrets: (input) => {
+    resolveEnv: (input) => {
       const user = input.username ?? input.name;
       const pass = input.password ?? 'changeme';
       const dbName = input.database ?? input.name;
       const port = input.port ?? 5432;
       return {
-        secrets: {
-          [`${input.name}-pass`]: pass,
-        },
-        secretMounts: [
-          { secretName: `${input.name}-pass`, target: 'POSTGRES_PASSWORD' },
-        ],
-        nonSecretEnv: {
+        env: {
           POSTGRES_USER: user,
+          POSTGRES_PASSWORD: pass,
           POSTGRES_DB: dbName,
         },
         connectionString: `postgresql://${user}:${pass}@${input.name}:${port}/${dbName}`,
@@ -87,62 +72,34 @@ const DB_PROFILES: Record<DatabaseType, DbProfile> = {
   },
 };
 
-// ─── Podman secrets ───────────────────────────────────────────────────────────
-// Podman returns 500 (not 409) when a secret with the same name already exists.
-// We treat both as non-fatal so the flow is idempotent on retries.
-
-async function podmanSecretDelete(name: string): Promise<void> {
-  await podmanRequest('DELETE', `/v5.0.0/libpod/secrets/${name}`);
-}
-
-function podmanSecretCreate(name: string, value: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const payload = Buffer.from(value);
-    const req = httpRequest(
-      {
-        socketPath: PODMAN_SOCK,
-        path: `/v5.0.0/libpod/secrets/create?name=${encodeURIComponent(name)}`,
-        method: 'POST',
-        headers: {
-          'Content-Type': 'text/plain',
-          'Content-Length': payload.length,
-        },
-      },
-      (res) => {
-        let body = '';
-        res.on('data', (c) => (body += c));
-        res.on('end', () => {
-          if (res.statusCode === 200 || res.statusCode === 201 || res.statusCode === 409)
-            resolve();
-          else if (res.statusCode === 500 && body.includes('secret name in use'))
-            resolve();
-          else
-            reject(new Error(`Secret create failed ${res.statusCode}: ${body}`));
-        });
-      }
-    );
-    req.on('error', reject);
-    req.write(payload);
-    req.end();
+function isPortFree(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    server.once('error', () => resolve(false));
+    server.once('listening', () => server.close(() => resolve(true)));
+    server.listen(port, '127.0.0.1');
   });
 }
 
-// ─── Quadlet ──────────────────────────────────────────────────────────────────
+async function findFreeHostPort(usedPorts: number[]): Promise<number> {
+  for (let p = HOST_PORT_RANGE_START; p <= HOST_PORT_RANGE_END; p++) {
+    if (usedPorts.includes(p)) continue;
+    if (await isPortFree(p)) return p;
+  }
+  throw new Error(`No free port found in range ${HOST_PORT_RANGE_START}-${HOST_PORT_RANGE_END}`);
+}
 
 function writeDbQuadlet(
   input: DatabaseInput,
   profile: DbProfile,
-  secretMounts: SecretMount[],
-  nonSecretEnv: Record<string, string>
+  env: Record<string, string>,
+  hostPort: number
 ): void {
   const hostDataDir = path.join(DATABASES_DIR, input.name);
+  const containerPort = input.port ?? profile.defaultPort;
 
-  const envLines = Object.entries(nonSecretEnv)
+  const envLines = Object.entries(env)
     .map(([k, v]) => `Environment=${k}=${v}`)
-    .join('\n');
-
-  const secretLines = secretMounts
-    .map(({ secretName, target }) => `Secret=${secretName},type=env,target=${target}`)
     .join('\n');
 
   const content = [
@@ -154,9 +111,9 @@ function writeDbQuadlet(
     `Image=${profile.image}`,
     `ContainerName=${input.name}`,
     `Network=proxy-net`,
+    `PublishPort=127.0.0.1:${hostPort}:${containerPort}`,
     `Volume=${hostDataDir}:${profile.dataDir}:z`,
     envLines,
-    secretLines,
     ``,
     `[Service]`,
     `Restart=always`,
@@ -169,90 +126,96 @@ function writeDbQuadlet(
   fs.writeFileSync(path.join(QUADLET_DIR, `${input.name}.container`), content);
 }
 
-// ─── Public API ───────────────────────────────────────────────────────────────
-
 export interface CreateDatabaseResult {
   name: string;
   type: DatabaseType;
   port: number;
+  host_port: number;
   connectionString: string;
+  tunnel: string;
 }
 
 export async function createDatabase(
   input: DatabaseInput,
+  usedHostPorts: number[],
   log: (msg: string) => void
 ): Promise<CreateDatabaseResult> {
   const profile = DB_PROFILES[input.type];
   if (!profile) throw new Error(`Unsupported database type: ${input.type}`);
 
   const port = input.port ?? profile.defaultPort;
+  const hostPort = input.host_port ?? await findFreeHostPort(usedHostPorts);
   const hostDataDir = path.join(DATABASES_DIR, input.name);
-  const { secrets, secretMounts, nonSecretEnv, connectionString } =
-    profile.resolveSecrets(input);
+  const { env, connectionString } = profile.resolveEnv(input);
+  const SERVER_HOST = process.env.SERVER_HOST || 'localhost';
 
-  log(`Creating data directory at ${hostDataDir}...`);
   fs.mkdirSync(hostDataDir, { recursive: true });
+  writeDbQuadlet(input, profile, env, hostPort);
 
-  log(`Creating Podman secrets for ${input.name}...`);
-  for (const [secretName, secretValue] of Object.entries(secrets)) {
-    await podmanSecretCreate(secretName, secretValue);
-    log(`  Secret "${secretName}" stored.`);
+  const already = await containerExists(input.name);
+
+  if (!already) {
+    const body = {
+      name: input.name,
+      image: profile.image,
+      env,
+      Networks: { 'proxy-net': { aliases: [input.name] } },
+      netns: { nsmode: 'bridge' },
+      restart_policy: 'always',
+      portmappings: [
+        {
+          host_ip: '127.0.0.1',
+          host_port: hostPort,
+          container_port: port,
+          protocol: 'tcp',
+        },
+      ],
+      mounts: [
+        {
+          type: 'bind',
+          source: hostDataDir,
+          destination: profile.dataDir,
+          options: ['z'],
+        },
+      ],
+    };
+
+    log(`Creating container ${input.name}...`);
+    const { status, data } = await podmanRequest(
+      'POST',
+      '/v5.0.0/libpod/containers/create',
+      body
+    );
+    if (status !== 201)
+      throw new Error(`Failed to create container: ${JSON.stringify(data)}`);
+
+    log(`Starting container ${input.name}...`);
+    const { status: s, data: d } = await podmanRequest(
+      'POST',
+      `/v5.0.0/libpod/containers/${input.name}/start`
+    );
+    if (s !== 204)
+      throw new Error(`Failed to start container: ${JSON.stringify(d)}`);
+  } else {
+    log(`Container ${input.name} already exists, adopting...`);
   }
 
-  log(`Writing Quadlet for ${input.name}...`);
-  writeDbQuadlet(input, profile, secretMounts, nonSecretEnv);
-
-  log(`Starting container ${input.name}...`);
-  const body = {
+  log(`Database ${input.name} is up on host port ${hostPort}.`);
+  return {
     name: input.name,
-    image: profile.image,
-    env: nonSecretEnv,
-    secrets: secretMounts.map(({ secretName, target }) => ({
-      source: secretName,
-      target,
-    })),
-    Networks: { 'proxy-net': { aliases: [input.name] } },
-    netns: { nsmode: 'bridge' },
-    restart_policy: 'always',
-    mounts: [{
-      type: 'bind',
-      source: hostDataDir,
-      destination: profile.dataDir,
-      options: ['z'],
-    }],
+    type: input.type,
+    port,
+    host_port: hostPort,
+    connectionString,
+    tunnel: `ssh -L ${hostPort}:127.0.0.1:${hostPort} deploy@${SERVER_HOST} -N`,
   };
-
-  const { status, data } = await podmanRequest(
-    'POST', '/v5.0.0/libpod/containers/create', body
-  );
-  if (status !== 201)
-    throw new Error(`Failed to create container: ${JSON.stringify(data)}`);
-
-  const { status: s, data: d } = await podmanRequest(
-    'POST', `/v5.0.0/libpod/containers/${input.name}/start`
-  );
-  if (s !== 204)
-    throw new Error(`Failed to start container: ${JSON.stringify(d)}`);
-
-  log(`Database ${input.name} is up.`);
-  return { name: input.name, type: input.type, port, connectionString };
 }
 
 export async function removeDatabase(
   name: string,
   log: (msg: string) => void
 ): Promise<void> {
-  log(`Stopping container ${name}...`);
   await stopAndRemoveContainer(name);
-
-  log(`Removing Podman secrets...`);
-  for (const suffix of ['pass', 'root-pass']) {
-    const secretName = `${name}-${suffix}`;
-    const { status } = await podmanRequest(
-      'DELETE', `/v5.0.0/libpod/secrets/${secretName}`
-    );
-    if (status === 204) log(`  Secret "${secretName}" removed.`);
-  }
 
   const quadletPath = path.join(QUADLET_DIR, `${name}.container`);
   if (fs.existsSync(quadletPath)) {
@@ -268,7 +231,8 @@ export async function getDatabaseStatus(name: string): Promise<{
   status?: string;
 }> {
   const { status, data } = await podmanRequest(
-    'GET', `/v5.0.0/libpod/containers/${name}/json`
+    'GET',
+    `/v5.0.0/libpod/containers/${name}/json`
   );
   if (status !== 200) return { running: false };
   const info = data as { State?: { Status?: string } };

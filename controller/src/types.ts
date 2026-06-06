@@ -15,6 +15,7 @@ export interface DatabaseConfig {
   name: string;
   type: DatabaseType;
   port?: number;
+  host_port?: number;
   env?: Record<string, string>;
   external_access?: boolean;
 }

@@ -6,7 +6,6 @@ import { DatabaseInput, createDatabase, removeDatabase, getDatabaseStatus } from
 const VALID_TYPES: DatabaseType[] = ['mysql', 'postgres'];
 
 export async function databaseRoutes(fastify: FastifyInstance): Promise<void> {
-  // Lista todas las DBs con su status en tiempo real
   fastify.get('/databases', async () => {
     const databases = readDatabases();
     const results = await Promise.all(
@@ -16,6 +15,7 @@ export async function databaseRoutes(fastify: FastifyInstance): Promise<void> {
           name: db.name,
           type: db.type,
           port: db.port,
+          host_port: db.host_port,
           running,
           status: status ?? 'unknown',
         };
@@ -24,7 +24,6 @@ export async function databaseRoutes(fastify: FastifyInstance): Promise<void> {
     return results;
   });
 
-  // Crear nueva DB
   fastify.post<{ Body: DatabaseInput }>('/databases', async (request, reply) => {
     const body = request.body;
 
@@ -45,18 +44,22 @@ export async function databaseRoutes(fastify: FastifyInstance): Promise<void> {
     if (databases.find((d) => d.name === body.name))
       return reply.status(409).send({ error: `Database "${body.name}" already exists` });
 
+    const usedHostPorts = databases
+      .map((d) => d.host_port)
+      .filter((p): p is number => p !== undefined);
+
     try {
       const logs: string[] = [];
-      const result = await createDatabase(body, (msg) => {
+      const result = await createDatabase(body, usedHostPorts, (msg) => {
         fastify.log.info(msg);
         logs.push(msg);
       });
 
-      // Solo metadatos en databases.json — sin credenciales
       const metadata: DatabaseConfig = {
         name: body.name,
         type: body.type,
-        ...(body.port ? { port: body.port } : {}),
+        port: result.port,
+        host_port: result.host_port,
         ...(body.external_access ? { external_access: body.external_access } : {}),
       };
       databases.push(metadata);
@@ -69,7 +72,6 @@ export async function databaseRoutes(fastify: FastifyInstance): Promise<void> {
     }
   });
 
-  // Eliminar DB — preserva datos en disco
   fastify.delete<{ Params: { name: string } }>(
     '/databases/:name',
     async (request, reply) => {
