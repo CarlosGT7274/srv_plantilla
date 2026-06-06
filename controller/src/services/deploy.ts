@@ -1,9 +1,10 @@
 import fs from 'fs';
 import path from 'path';
 import { execSync } from 'child_process';
+import { request as httpRequest } from 'http';
 import simpleGit from 'simple-git';
 import { AppConfig } from '../types.js';
-import { BUILDS_DIR, buildImageViaSock, splitEnvVars, stopAndRemoveContainer, startAppContainer } from './podman.js';
+import { BUILDS_DIR, PODMAN_SOCK, buildImageViaSock, splitEnvVars, stopAndRemoveContainer, startAppContainer } from './podman.js';
 import { detectProject, generateDockerfile } from './dockerfile.js';
 
 const QUADLET_DIR = process.env.QUADLET_DIR || '/quadlets';
@@ -26,6 +27,54 @@ async function cloneOrPull(app: AppConfig, buildPath: string): Promise<void> {
     await simpleGit(buildPath).remote(['set-url', 'origin', cloneUrl]);
     await simpleGit(buildPath).pull();
   }
+}
+
+// ─── Health probe ─────────────────────────────────────────────────────────────
+// Purely informational — result does NOT affect whether the label is applied.
+// Traefik always gets the healthcheck label; this probe just warns the developer
+// if the app doesn't implement GET /health yet.
+
+async function probeHealthEndpoint(
+  app: AppConfig,
+  log: (msg: string) => void
+): Promise<void> {
+  await new Promise((r) => setTimeout(r, 3000));
+
+  const { status, data } = await podmanInspect(app.name);
+  if (status !== 200) return;
+
+  const info = data as {
+    NetworkSettings?: {
+      Networks?: Record<string, { IPAddress?: string }>;
+    };
+  };
+
+  const ip = info.NetworkSettings?.Networks?.['proxy-net']?.IPAddress;
+  if (!ip) return;
+
+  const hasHealth = await new Promise<boolean>((resolve) => {
+    const req = httpRequest(
+      { host: ip, port: app.port, path: '/health', method: 'GET' },
+      (res) => resolve(res.statusCode === 200)
+    );
+    req.setTimeout(2000, () => {
+      req.destroy();
+      resolve(false);
+    });
+    req.on('error', () => resolve(false));
+    req.end();
+  });
+
+  if (hasHealth) {
+    log(`✓  ${app.name}: /health detected`);
+  } else {
+    log(`⚠  ${app.name}: no /health endpoint found — add GET /health returning 200 to enable Traefik health checks`);
+  }
+}
+
+async function podmanInspect(name: string): Promise<{ status: number; data: unknown }> {
+  const { podmanRequest } = await import('./podman.js');
+  return podmanRequest('GET', `/v5.0.0/libpod/containers/${name}/json`);
 }
 
 // ─── Quadlet ─────────────────────────────────────────────────────────────────
@@ -115,6 +164,9 @@ export async function triggerDeploy(
     writeAppQuadlet(app, imageName);
     await stopAndRemoveContainer(app.name);
     await startAppContainer(app, imageName);
+
+    log(`Probing /health endpoint on ${app.name}...`);
+    probeHealthEndpoint(app, log).catch(() => { });
 
     log(`Deploy complete: ${app.name} @ ${imageName}`);
   } catch (err) {

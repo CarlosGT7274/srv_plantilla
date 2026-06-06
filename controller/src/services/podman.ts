@@ -77,7 +77,7 @@ export async function startAppContainer(
     image: imageName,
     env: runtimeEnv,
     Networks: { 'proxy-net': { aliases: [app.name] } },
-    labels: {
+    Labels: {
       'traefik.enable': 'true',
       [`traefik.http.routers.${app.name}.rule`]: `Host(\`${app.domain}\`)`,
       [`traefik.http.routers.${app.name}.entrypoints`]: 'websecure',
