@@ -1,4 +1,3 @@
----
 - name: Install build tools on host
   dnf:
     name:
@@ -45,10 +44,20 @@
     - "{{ controller_dir }}/builds"
     - "{{ controller_dir }}/config"
 
-- name: Template Controller app config
-  template:
-    src: config.json.j2
+- name: Create apps.json if not exists
+  copy:
+    content: "[]"
     dest: "{{ controller_dir }}/config/apps.json"
+    force: no
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: '0644'
+
+- name: Create databases.json if not exists
+  copy:
+    content: "[]"
+    dest: "{{ controller_dir }}/config/databases.json"
+    force: no
     owner: "{{ deploy_user }}"
     group: "{{ deploy_user }}"
     mode: '0644'

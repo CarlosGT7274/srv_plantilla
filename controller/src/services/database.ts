@@ -6,6 +6,7 @@ import { podmanRequest, stopAndRemoveContainer, containerExists } from './podman
 
 const QUADLET_DIR = process.env.QUADLET_DIR || '/quadlets';
 const DATABASES_DIR = process.env.DATABASES_DIR || '/home/deploy/databases';
+const SERVER_HOST = process.env.SERVER_HOST || 'localhost';
 const HOST_PORT_RANGE_START = 3300;
 const HOST_PORT_RANGE_END = 3400;
 
@@ -147,7 +148,6 @@ export async function createDatabase(
   const hostPort = input.host_port ?? await findFreeHostPort(usedHostPorts);
   const hostDataDir = path.join(DATABASES_DIR, input.name);
   const { env, connectionString } = profile.resolveEnv(input);
-  const SERVER_HOST = process.env.SERVER_HOST || 'localhost';
 
   fs.mkdirSync(hostDataDir, { recursive: true });
   writeDbQuadlet(input, profile, env, hostPort);
