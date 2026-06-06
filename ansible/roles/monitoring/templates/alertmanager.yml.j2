@@ -7,9 +7,9 @@ global:
   smtp_require_tls: true
 
 route:
-  group_by: ['alertname', 'severity', 'name']
-  group_wait: 2s
-  group_interval: 5s
+  group_by: ['alertname', 'name']
+  group_wait: 8s
+  group_interval: 5m
   repeat_interval: 1h
   receiver: 'email-alerts'
 
@@ -26,13 +26,13 @@ receivers:
             <h2 style="color: {{ if eq .Status "firing" }}#d32f2f{{ else }}#388e3c{{ end }};">
               Estado: {{ .Status | toUpper }}
             </h2>
-            <p>Se ha detectado un evento en el contenedor: <strong>{{ .GroupLabels.name }}</strong></p>
+            <p>Contenedor: <strong>{{ .GroupLabels.name }}</strong></p>
             <hr />
             {{ range .Alerts }}
               <div style="margin-bottom: 15px;">
                 <strong>Alerta:</strong> {{ .Labels.alertname }}<br>
                 <strong>Gravedad:</strong> {{ .Labels.severity }}<br>
-                <strong>Descripción:</strong> {{ .Annotations.description }}<br>
+                <strong>Descripcion:</strong> {{ .Annotations.description }}<br>
                 <strong>Iniciado:</strong> {{ .StartsAt.Format "15:04:05 02/01/2006" }}
               </div>
             {{ end }}

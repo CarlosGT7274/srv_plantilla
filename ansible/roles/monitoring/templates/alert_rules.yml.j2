@@ -1,30 +1,27 @@
 groups:
-  - name: app_realtime_alerts
+  - name: contenedor_alerts
     rules:
-      # 1. ALERTA DE CAÍDA INSTANTÁNEA
-      # Buscamos cualquier contenedor que NO esté en estado 2 (Running).
-      # Usamos 'last_over_time' para mantener el label 'name' en memoria aunque la app desaparezca.
       - alert: ContenedorCaido
         expr: |
           (
-            (podman_container_state != 2) or absent(podman_container_state)
-          )
-          * on(id) group_left(name) (last_over_time(podman_container_info[5m]))
-        for: 2s # Solo 2 segundos de persistencia para evitar ruidos de red
+            podman_container_state != 2
+          ) * on(id) group_left(name) podman_container_info
+        for: 5s
         labels:
           severity: critical
         annotations:
-          summary: "Muerte de App: {% raw %}{{ $labels.name }}{% endraw %}"
-          description: "La aplicación '{% raw %}{{ $labels.name }}{% endraw %}' se ha detenido (Estado: {% raw %}{{ $value }}{% endraw %})."
+          summary: "Caida: {{ '{{' }} $labels.name {{ '}}' }}"
+          description: "El contenedor '{{ '{{' }} $labels.name {{ '}}' }}' no esta running (estado={{ '{{' }} $value {{ '}}' }})."
 
-      # 2. ALERTA DE REINICIO REAL (Detecta si el proceso es muy joven)
-      - alert: ContenedorReiniciado
+      - alert: ContenedorCrashLoop
         expr: |
-          ((time() - podman_container_created_seconds) < 60)
-          * on(id) group_left(name) (last_over_time(podman_container_info[5m]))
-        for: 0s # Disparo inmediato
+          (
+            changes(podman_container_state[2m]) > 3
+          ) * on(id) group_left(name) podman_container_info
+        for: 0s
         labels:
           severity: warning
         annotations:
-          summary: "Reinicio: {% raw %}{{ $labels.name }}{% endraw %}"
-          description: "El proceso del contenedor '{% raw %}{{ $labels.name }}{% endraw %}' acaba de iniciar (uptime < 60s)."
+          summary: "Crash loop: {{ '{{' }} $labels.name {{ '}}' }}"
+          description: "El contenedor '{{ '{{' }} $labels.name {{ '}}' }}' cambio de estado {{ '{{' }} $value {{ '}}' }} veces en los ultimos 2 minutos."
+
