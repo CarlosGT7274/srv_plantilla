@@ -1,49 +1,32 @@
-{% set app_names = (apps | map(attribute='name') | list) + (managed_databases | map(attribute='name') | list) %}
-{% set names_regex = app_names | join('|') if app_names else '' %}
 groups:
   - name: contenedor_alerts
     interval: 15s
     rules:
-{% if app_names %}
-      - alert: ContenedorEstadoMalo
-        expr: |
-          podman_container_state{name=~"{{ names_regex }}"} != 2
+      - alert: ContenedorCaido
+        expr: podman_container_state != 2
         for: 10s
         labels:
           severity: critical
         annotations:
-          summary: "Caida: {{ '{{' }} $labels.name {{ '}}' }}"
-          description: "El contenedor '{{ '{{' }} $labels.name {{ '}}' }}' no esta running (estado={{ '{{' }} $value {{ '}}' }})."
-
-      - alert: ContenedorDesaparecido
-        expr: |
-{% for name in app_names %}
-          absent_over_time(podman_container_state{name="{{ name }}"}[2m]){{ ' or' if not loop.last else '' }}
-{% endfor %}
-        for: 15s
-        labels:
-          severity: critical
-        annotations:
-          summary: "Contenedor desaparecido: {{ '{{' }} $labels.name {{ '}}' }}"
-          description: "El contenedor '{{ '{{' }} $labels.name {{ '}}' }}' desapareció del exporter por más de 2 minutos."
+          summary: "Contenedor caído: {{ '{{' }} $labels.name {{ '}}' }}"
+          description: "El contenedor '{{ '{{' }} $labels.name {{ '}}' }}' no está running (estado={{ '{{' }} $value {{ '}}' }})."
 
       - alert: ContenedorCrashLoop
-        expr: |
-          changes(podman_container_state{name=~"{{ names_regex }}"}[5m]) > 4
+        expr: changes(podman_container_state[5m]) > 4
         for: 0s
         labels:
           severity: warning
         annotations:
           summary: "Crash loop: {{ '{{' }} $labels.name {{ '}}' }}"
           description: "El contenedor '{{ '{{' }} $labels.name {{ '}}' }}' cambió de estado {{ '{{' }} $value {{ '}}' }} veces en 5 minutos."
-{% endif %}
+
       - alert: ExporterPodmanCaido
         expr: up{job="podman"} == 0
         for: 15s
         labels:
           severity: critical
         annotations:
-          summary: "Podman exporter caido"
+          summary: "Podman exporter caído"
           description: "El exporter de Podman no responde. Sin visibilidad de contenedores."
 
   - name: system_alerts
@@ -82,5 +65,5 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: "Node exporter caido"
+          summary: "Node exporter caído"
           description: "Node exporter no responde desde hace más de 2 minutos."
