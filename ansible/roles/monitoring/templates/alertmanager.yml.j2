@@ -18,5 +18,6 @@ receivers:
   email_configs:
   - to: '{{ alertmanager_email_to }}'
     send_resolved: true
-    subject: '{% raw %}{{ .GroupLabels.alertname }} - {{ .Status }}{% endraw %}'
-    body: '{% raw %}{{ range .Alerts }}{{ .Annotations.summary }} - {{ .Annotations.description }} ({{ .Labels.severity }}){{ end }}{% endraw %}'
+    headers:
+      Subject: '{% raw %}{{ .GroupLabels.alertname }} - {{ .Status }}{% endraw %}'
+    html: '{% raw %}{{ range .Alerts }}{{ .Annotations.summary }} - {{ .Annotations.description }} ({{ .Labels.severity }}){{ end }}{% endraw %}'
