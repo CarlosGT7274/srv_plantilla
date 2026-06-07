@@ -1,5 +1,4 @@
 ---
-# ansible/roles/monitoring/tasks/main.yml
 - name: Include vault variables
   include_vars: vault.yml
 
@@ -15,7 +14,7 @@
     owner: "{{ deploy_user }}"
     group: "{{ deploy_user }}"
     mode: '0777'
-    recurse: yes # Asegura que los subdirectorios de data también sean escribibles
+    recurse: yes
   loop:
     - "{{ monitoring_dir }}"
     - "{{ monitoring_dir }}/prometheus"
@@ -29,7 +28,7 @@
     dest: "{{ monitoring_dir }}/prometheus/prometheus.yml"
     owner: "{{ deploy_user }}"
     group: "{{ deploy_user }}"
-  notify: Restart monitoring services
+  notify: Reload systemd user
 
 - name: Template Alertmanager configuration
   template:
@@ -37,7 +36,7 @@
     dest: "{{ monitoring_dir }}/alertmanager/alertmanager.yml"
     owner: "{{ deploy_user }}"
     group: "{{ deploy_user }}"
-  notify: Restart monitoring services
+  notify: Reload systemd user
 
 - name: Template Alerting Rules
   template:
@@ -45,21 +44,22 @@
     dest: "{{ monitoring_dir }}/prometheus/alert_rules.yml"
     owner: "{{ deploy_user }}"
     group: "{{ deploy_user }}"
-  notify: Restart monitoring services
+  notify: Reload systemd user
 
 - name: Deploy Monitoring Quadlets
   template:
     src: "{{ item }}.container.j2"
-    dest: "/home/{{ deploy_user }}/.config/containers/systemd/{{ item.container_name | default(item) }}.container"
+    dest: "/home/{{ deploy_user }}/.config/containers/systemd/{{ item }}.container"
     owner: "{{ deploy_user }}"
     group: "{{ deploy_user }}"
+    mode: '0644'
   loop:
     - prometheus
     - grafana
     - alertmanager
     - node-exporter
     - podman-exporter
-  notify: Restart monitoring services
+  notify: Reload systemd user
 
 - name: Flush handlers to reload systemd
   meta: flush_handlers
@@ -68,7 +68,7 @@
   systemd:
     name: "{{ item }}.service"
     scope: user
-    state: started
+    state: restarted
     enabled: yes
     daemon_reload: yes
   become: yes
