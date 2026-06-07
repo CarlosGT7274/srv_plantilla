@@ -1,0 +1,81 @@
+---
+- name: Include vault variables
+  include_vars: vault.yml
+
+- name: Get deploy user info
+  user:
+    name: "{{ deploy_user }}"
+  register: deploy_user_info
+
+- name: Create monitoring directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: '0777'
+    recurse: yes
+  loop:
+    - "{{ monitoring_dir }}"
+    - "{{ monitoring_dir }}/prometheus"
+    - "{{ monitoring_dir }}/prometheus/data"
+    - "{{ monitoring_dir }}/grafana"
+    - "{{ monitoring_dir }}/alertmanager"
+
+- name: Template Prometheus configuration
+  template:
+    src: prometheus.yml.j2
+    dest: "{{ monitoring_dir }}/prometheus/prometheus.yml"
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+
+- name: Template Alertmanager configuration
+  template:
+    src: alertmanager.yml.j2
+    dest: "{{ monitoring_dir }}/alertmanager/alertmanager.yml"
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+
+- name: Template Alerting Rules
+  template:
+    src: alert_rules.yml.j2
+    dest: "{{ monitoring_dir }}/prometheus/alert_rules.yml"
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+
+- name: Deploy Monitoring Quadlets
+  template:
+    src: "{{ item }}.container.j2"
+    dest: "/home/{{ deploy_user }}/.config/containers/systemd/{{ item }}.container"
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: '0644'
+  loop:
+    - prometheus
+    - grafana
+    - alertmanager
+    - node-exporter
+    - podman-exporter
+
+- name: Reload systemd user daemon
+  command: systemctl --user daemon-reload
+  become: yes
+  become_user: "{{ deploy_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ deploy_user_info.uid }}"
+    DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ deploy_user_info.uid }}/bus"
+
+- name: Start and enable monitoring services
+  command: systemctl --user enable --now {{ item }}.service
+  become: yes
+  become_user: "{{ deploy_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ deploy_user_info.uid }}"
+    DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ deploy_user_info.uid }}/bus"
+  loop:
+    - node-exporter
+    - podman-exporter
+    - prometheus
+    - alertmanager
+    - grafana
+

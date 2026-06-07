@@ -1,23 +1,13 @@
+{% set app_names = (apps | map(attribute='name') | list) + (managed_databases | map(attribute='name') | list) %}
+{% set names_regex = app_names | join('|') if app_names else '' %}
 groups:
   - name: contenedor_alerts
+    interval: 15s
     rules:
-      - alert: ContenedorCaido
-        expr: |
-          absent_over_time(
-            podman_container_info{name=~"{{ (apps | map(attribute='name') | list + managed_databases | map(attribute='name') | list) | join('|') }}"}[1m]
-          )
-        for: 15s
-        labels:
-          severity: critical
-        annotations:
-          summary: "Caida: {{ '{{' }} $labels.name {{ '}}' }}"
-          description: "El contenedor '{{ '{{' }} $labels.name {{ '}}' }}' desaparecio del exporter."
-
+{% if app_names %}
       - alert: ContenedorEstadoMalo
         expr: |
-          (
-            podman_container_state{name!~"POD-.*|[0-9a-f]{12}"} != 2
-          ) * on(id) group_left(name) podman_container_info
+          podman_container_state{name=~"{{ names_regex }}"} != 2
         for: 10s
         labels:
           severity: critical
@@ -25,18 +15,28 @@ groups:
           summary: "Caida: {{ '{{' }} $labels.name {{ '}}' }}"
           description: "El contenedor '{{ '{{' }} $labels.name {{ '}}' }}' no esta running (estado={{ '{{' }} $value {{ '}}' }})."
 
+      - alert: ContenedorDesaparecido
+        expr: |
+{% for name in app_names %}
+          absent_over_time(podman_container_state{name="{{ name }}"}[2m]){{ ' or' if not loop.last else '' }}
+{% endfor %}
+        for: 15s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Contenedor desaparecido: {{ '{{' }} $labels.name {{ '}}' }}"
+          description: "El contenedor '{{ '{{' }} $labels.name {{ '}}' }}' desapareció del exporter por más de 2 minutos."
+
       - alert: ContenedorCrashLoop
         expr: |
-          (
-            changes(podman_container_state{name!~"POD-.*|[0-9a-f]{12}"}[2m]) > 3
-          ) * on(id) group_left(name) podman_container_info
+          changes(podman_container_state{name=~"{{ names_regex }}"}[5m]) > 4
         for: 0s
         labels:
           severity: warning
         annotations:
           summary: "Crash loop: {{ '{{' }} $labels.name {{ '}}' }}"
-          description: "El contenedor '{{ '{{' }} $labels.name {{ '}}' }}' cambio de estado {{ '{{' }} $value {{ '}}' }} veces en los ultimos 2 minutos."
-
+          description: "El contenedor '{{ '{{' }} $labels.name {{ '}}' }}' cambió de estado {{ '{{' }} $value {{ '}}' }} veces en 5 minutos."
+{% endif %}
       - alert: ExporterPodmanCaido
         expr: up{job="podman"} == 0
         for: 15s
@@ -44,4 +44,43 @@ groups:
           severity: critical
         annotations:
           summary: "Podman exporter caido"
-          description: "El exporter de Podman no responde. No hay visibilidad de contenedores."
+          description: "El exporter de Podman no responde. Sin visibilidad de contenedores."
+
+  - name: system_alerts
+    interval: 30s
+    rules:
+      - alert: HighCPUUsage
+        expr: 100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU usage on {{ '{{' }} $labels.instance {{ '}}' }}"
+          description: "CPU usage is {{ '{{' }} $value {{ '}}' }}% on {{ '{{' }} $labels.instance {{ '}}' }}"
+
+      - alert: HighMemoryUsage
+        expr: (node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / node_memory_MemTotal_bytes * 100 > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage on {{ '{{' }} $labels.instance {{ '}}' }}"
+          description: "Memory usage is {{ '{{' }} $value {{ '}}' }}% on {{ '{{' }} $labels.instance {{ '}}' }}"
+
+      - alert: LowDiskSpace
+        expr: (node_filesystem_avail_bytes{fstype!="tmpfs"} / node_filesystem_size_bytes{fstype!="tmpfs"}) * 100 < 15
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low disk space on {{ '{{' }} $labels.instance {{ '}}' }}"
+          description: "Disk {{ '{{' }} $labels.mountpoint {{ '}}' }} on {{ '{{' }} $labels.instance {{ '}}' }} has only {{ '{{' }} $value {{ '}}' }}% free"
+
+      - alert: NodeDown
+        expr: up{job="node"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Node exporter caido"
+          description: "Node exporter no responde desde hace más de 2 minutos."

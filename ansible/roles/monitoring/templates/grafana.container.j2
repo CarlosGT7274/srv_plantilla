@@ -5,7 +5,6 @@ After=network-online.target
 [Container]
 Image=docker.io/grafana/grafana:{{ grafana_version }}
 ContainerName=grafana
-Network=monitoring-net
 Network=proxy-net
 Volume={{ monitoring_dir }}/grafana:/var/lib/grafana:z,U
 Environment=GF_SECURITY_ADMIN_PASSWORD={{ grafana_admin_password }}

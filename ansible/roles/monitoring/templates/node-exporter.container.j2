@@ -5,12 +5,9 @@ After=network-online.target
 [Container]
 Image=docker.io/prom/node-exporter:{{ node_exporter_version }}
 ContainerName=node-exporter
-Network=monitoring-net
+Network=proxy-net
 Volume=/:/host:ro,rslave
-# We use host pid and network for accurate host metrics if needed, 
-# but for rootless we might have restrictions.
-# Standard node-exporter usually needs --path.rootfs=/host
-Exec=--path.rootfs=/host
+Exec=--path.rootfs=/host --web.listen-address=0.0.0.0:9100
 
 [Install]
 WantedBy=default.target

@@ -18,3 +18,4 @@ alertmanager_smtp_user: "carlosbt7274@gmail.com"
 alertmanager_smtp_pass: "{{ vault_alertmanager_smtp_pass }}"
 alertmanager_email_to: "carlosbt7274@gmail.com"
 
+logging_podman_exporter_image: "quay.io/navidys/prometheus-podman-exporter:v1.14.1"
