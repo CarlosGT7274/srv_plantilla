@@ -5,6 +5,8 @@ ssh_permit_root_login: "prohibit-password"
 ssh_password_authentication: "no"
 deploy_user: deploy
 deploy_user_shell: /bin/bash
+managed_label_name: "servidor-jair.managed"
+managed_label_prom: "container_label_servidor_jair_managed"
 allowed_firewalld_services:
   - ssh
   - http

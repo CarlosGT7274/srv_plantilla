@@ -1,7 +1,7 @@
 export interface AppConfig {
   name: string;
   repo: string;
-  domain: string;
+  domain?: string;
   port: number;
   private?: boolean;
   github_token?: string;

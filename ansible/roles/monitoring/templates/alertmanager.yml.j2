@@ -8,8 +8,8 @@ global:
 
 route:
   group_by: ['alertname']
-  group_wait: 10s
-  group_interval: 10s
+  group_wait: 0s
+  group_interval: 2s
   repeat_interval: 1h
   receiver: 'email-alerts'
 

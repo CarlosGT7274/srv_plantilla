@@ -7,6 +7,7 @@ Image=docker.io/prom/alertmanager:{{ alertmanager_version }}
 ContainerName=alertmanager
 Network=proxy-net
 Volume={{ monitoring_dir }}/alertmanager:/etc/alertmanager:z,U
+Label={{ managed_label_name }}=true
 Label=traefik.enable=true
 Label=traefik.docker.network=proxy-net
 Label=traefik.http.routers.alertmanager.rule=Host(`{{ alertmanager_domain }}`)

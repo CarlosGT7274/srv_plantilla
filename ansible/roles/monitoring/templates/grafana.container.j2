@@ -8,6 +8,7 @@ ContainerName=grafana
 Network=proxy-net
 Volume={{ monitoring_dir }}/grafana:/var/lib/grafana:z,U
 Environment=GF_SECURITY_ADMIN_PASSWORD={{ grafana_admin_password }}
+Label={{ managed_label_name }}=true
 Label=traefik.enable=true
 Label=traefik.http.routers.grafana.rule=Host(`{{ grafana_domain }}`)
 Label=traefik.http.routers.grafana.entrypoints=websecure

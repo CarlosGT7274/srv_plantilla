@@ -5,7 +5,8 @@ After=network-online.target
 [Container]
 ContainerName=podman-exporter
 Image={{ logging_podman_exporter_image }}
-Network=host
+Label={{ managed_label_name }}=true
+Network=proxy-net
 Environment=CONTAINER_HOST=unix:///run/user/{{ deploy_user_info.uid }}/podman/podman.sock
 Volume=/run/user/{{ deploy_user_info.uid }}/podman/podman.sock:/run/user/{{ deploy_user_info.uid }}/podman/podman.sock:ro
 UserNS=keep-id

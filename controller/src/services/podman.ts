@@ -72,18 +72,31 @@ export async function startAppContainer(
   healthPath: string | null
 ): Promise<void> {
   const { runtimeEnv } = splitEnvVars(app.env ?? {});
+  const managedLabel = process.env.MANAGED_LABEL || 'servidor-jair.managed';
 
   const labels: Record<string, string> = {
-    'traefik.enable': 'true',
-    [`traefik.http.routers.${app.name}.rule`]: `Host(\`${app.domain}\`)`,
-    [`traefik.http.routers.${app.name}.entrypoints`]: 'websecure',
-    [`traefik.http.routers.${app.name}.tls.certresolver`]: 'letsencrypt',
-    [`traefik.http.services.${app.name}.loadbalancer.server.port`]: String(app.port),
+    [managedLabel]: 'true',
   };
 
-  if (healthPath) {
-    labels[`traefik.http.services.${app.name}.loadbalancer.healthcheck.path`] = healthPath;
+  if (app.domain) {
+    labels['traefik.enable'] = 'true';
+    labels[`traefik.http.routers.${app.name}.rule`] = `Host(\`${app.domain}\`)`;
+    labels[`traefik.http.routers.${app.name}.entrypoints`] = 'websecure';
+    labels[`traefik.http.routers.${app.name}.tls.certresolver`] = 'letsencrypt';
+    labels[`traefik.http.services.${app.name}.loadbalancer.server.port`] = String(app.port);
+    if (healthPath) {
+      labels[`traefik.http.services.${app.name}.loadbalancer.healthcheck.path`] = healthPath;
+    }
   }
+
+  const portmappings = app.domain ? [] : [
+    {
+      host_ip: '127.0.0.1',
+      host_port: app.port + 1000,
+      container_port: app.port,
+      protocol: 'tcp',
+    }
+  ];
 
   const body: any = {
     name: app.name,
@@ -93,6 +106,7 @@ export async function startAppContainer(
     Labels: labels,
     netns: { nsmode: 'bridge' },
     restart_policy: 'always',
+    portmappings,
     mounts: (app.volumes ?? []).map((v) => {
       const [src, dst, ...opts] = v.split(':');
       return { type: 'bind', source: src, destination: dst, options: opts };

@@ -6,7 +6,8 @@ After=network-online.target
 Image={{ item.image }}
 ContainerName={{ item.name }}
 Network=proxy-net
-PublishPort=127.0.0.1:3307:{{ item.port }}
+Label={{ managed_label_name }}=true
+PublishPort=127.0.0.1:{{ item.host_port | default(3307) }}:{{ item.port }}
 Volume={{ databases_dir }}/{{ item.name }}:/var/lib/mysql:z
 {% for key, value in (item.env | default({})).items() %}
 Environment={{ key }}={{ value }}

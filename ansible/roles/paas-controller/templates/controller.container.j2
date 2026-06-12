@@ -23,7 +23,9 @@ Environment=QUADLET_DIR=/quadlets
 Environment=DATABASES_DIR=/home/{{ deploy_user }}/databases
 Environment=CONTAINER_HOST=unix:///run/user/{{ deploy_user_info.uid }}/podman/podman.sock
 Environment=SERVER_HOST={{ ansible_host }}
+Environment=MANAGED_LABEL={{ managed_label_name }}
 
+Label={{ managed_label_name }}=true
 Label=traefik.enable=true
 Label=traefik.http.routers.paas-controller.rule=Host(`{{ controller_domain }}`)
 Label=traefik.http.routers.paas-controller.entrypoints=websecure

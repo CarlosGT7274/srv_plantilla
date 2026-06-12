@@ -22,7 +22,11 @@ HealthRetries=3
 HealthTimeout=5s
 HealthStartPeriod=30s
 
+# Monitoring Label
+Label={{ managed_label_name }}=true
+
 # Traefik Automation
+{% if item.domain is defined and item.domain %}
 Label=traefik.enable=true
 Label=traefik.http.routers.{{ item.name }}.rule=Host(`{{ item.domain }}`)
 Label=traefik.http.routers.{{ item.name }}.entrypoints=websecure
@@ -30,6 +34,9 @@ Label=traefik.http.routers.{{ item.name }}.tls.certresolver=letsencrypt
 Label=traefik.http.services.{{ item.name }}.loadbalancer.server.port={{ item.port }}
 # Ensure Traefik waits for healthcheck before routing if possible
 Label=traefik.http.services.{{ item.name }}.loadbalancer.healthcheck.path=/health
+{% else %}
+PublishPort=127.0.0.1:{{ item.host_port | default(item.port + 1000) }}:{{ item.port }}
+{% endif %}
 
 [Service]
 # Auto-restart if the app crashes

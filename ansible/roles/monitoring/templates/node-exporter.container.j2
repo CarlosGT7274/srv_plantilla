@@ -5,6 +5,7 @@ After=network-online.target
 [Container]
 Image=docker.io/prom/node-exporter:{{ node_exporter_version }}
 ContainerName=node-exporter
+Label={{ managed_label_name }}=true
 Network=proxy-net
 Volume=/:/host:ro,rslave
 Exec=--path.rootfs=/host --web.listen-address=0.0.0.0:9100

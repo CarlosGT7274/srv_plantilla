@@ -98,6 +98,7 @@ function writeDbQuadlet(
 ): void {
   const hostDataDir = path.join(DATABASES_DIR, input.name);
   const containerPort = input.port ?? profile.defaultPort;
+  const managedLabel = process.env.MANAGED_LABEL || 'servidor-jair.managed';
 
   const envLines = Object.entries(env)
     .map(([k, v]) => `Environment=${k}=${v}`)
@@ -112,6 +113,7 @@ function writeDbQuadlet(
     `Image=${profile.image}`,
     `ContainerName=${input.name}`,
     `Network=proxy-net`,
+    `Label=${managedLabel}=true`,
     `PublishPort=127.0.0.1:${hostPort}:${containerPort}`,
     `Volume=${hostDataDir}:${profile.dataDir}:z`,
     envLines,

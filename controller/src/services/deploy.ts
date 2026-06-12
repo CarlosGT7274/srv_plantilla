@@ -122,9 +122,18 @@ function writeAppQuadlet(app: AppConfig, imageName: string, healthPath: string |
     `HealthStartPeriod=30s`,
   ] : [];
 
-  const traefikHealthLabel = healthPath
-    ? [`Label=traefik.http.services.${app.name}.loadbalancer.healthcheck.path=${healthPath}`]
-    : [];
+  const traefikLabels = app.domain ? [
+    `Label=traefik.enable=true`,
+    `Label=traefik.http.routers.${app.name}.rule=Host(\`${app.domain}\`)`,
+    `Label=traefik.http.routers.${app.name}.entrypoints=websecure`,
+    `Label=traefik.http.routers.${app.name}.tls.certresolver=letsencrypt`,
+    `Label=traefik.http.services.${app.name}.loadbalancer.server.port=${app.port}`,
+    ...(healthPath ? [`Label=traefik.http.services.${app.name}.loadbalancer.healthcheck.path=${healthPath}`] : []),
+  ] : [
+    `PublishPort=127.0.0.1:${app.port + 1000}:${app.port}`
+  ];
+
+  const managedLabel = process.env.MANAGED_LABEL || 'servidor-jair.managed';
 
   const content = [
     `[Unit]`,
@@ -135,17 +144,13 @@ function writeAppQuadlet(app: AppConfig, imageName: string, healthPath: string |
     `Image=${imageName}`,
     `ContainerName=${app.name}`,
     `Network=proxy-net`,
+    `Label=${managedLabel}=true`,
     volumeLines,
     envLines,
     ``,
     ...healthLines,
     ``,
-    `Label=traefik.enable=true`,
-    `Label=traefik.http.routers.${app.name}.rule=Host(\`${app.domain}\`)`,
-    `Label=traefik.http.routers.${app.name}.entrypoints=websecure`,
-    `Label=traefik.http.routers.${app.name}.tls.certresolver=letsencrypt`,
-    `Label=traefik.http.services.${app.name}.loadbalancer.server.port=${app.port}`,
-    ...traefikHealthLabel,
+    ...traefikLabels,
     ``,
     `[Service]`,
     `Restart=always`,

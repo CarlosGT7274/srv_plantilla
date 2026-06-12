@@ -1,24 +1,48 @@
 groups:
   - name: contenedor_alerts
-    interval: 15s
+    interval: 5s
     rules:
-      - alert: ContenedorCaido
-        expr: podman_container_state != 2
-        for: 10s
+      - alert: ContenedorNoDisponible
+        expr: |
+          (podman_container_state != 2) * on(id) group_left(name) podman_container_info{ {{ managed_label_prom }}="true" }
+        for: 4s
         labels:
           severity: critical
         annotations:
-          summary: "Contenedor caído: {{ '{{' }} $labels.name {{ '}}' }}"
-          description: "El contenedor '{{ '{{' }} $labels.name {{ '}}' }}' no está running (estado={{ '{{' }} $value {{ '}}' }})."
+          summary: "Contenedor no disponible: {% raw %}{{ $labels.name }}{% endraw %}"
+          description: "El contenedor gestionado '{% raw %}{{ $labels.name }}{% endraw %}' no está en estado RUNNING (estado actual={% raw %}{{ $value }}{% endraw %})."
+
+      - alert: ContenedorDesaparecido
+        expr: |
+          (podman_container_info{ {{ managed_label_prom }}="true" } offset 10s) 
+          unless 
+          podman_container_info{ {{ managed_label_prom }}="true" }
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Contenedor eliminado/desaparecido: {% raw %}{{ $labels.name }}{% endraw %}"
+          description: "El contenedor '{% raw %}{{ $labels.name }}{% endraw %}' ha dejado de reportar métricas (posible borrado)."
+
+      - alert: ContenedorNoSaludable
+        expr: |
+          podman_container_health{ {{ managed_label_prom }}="true" } == 1
+        for: 4s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Contenedor no saludable: {% raw %}{{ $labels.name }}{% endraw %}"
+          description: "El healthcheck del contenedor '{% raw %}{{ $labels.name }}{% endraw %}' ha fallado."
 
       - alert: ContenedorCrashLoop
-        expr: changes(podman_container_state[5m]) > 4
+        expr: |
+          (changes(podman_container_state[5m]) > 4) * on(id) group_left(name) podman_container_info{name!=""}
         for: 0s
         labels:
           severity: warning
         annotations:
-          summary: "Crash loop: {{ '{{' }} $labels.name {{ '}}' }}"
-          description: "El contenedor '{{ '{{' }} $labels.name {{ '}}' }}' cambió de estado {{ '{{' }} $value {{ '}}' }} veces en 5 minutos."
+          summary: "Crash loop: {% raw %}{{ $labels.name }}{% endraw %}"
+          description: "El contenedor '{% raw %}{{ $labels.name }}{% endraw %}' cambió de estado {% raw %}{{ $value }}{% endraw %} veces en 5 minutos."
 
       - alert: ExporterPodmanCaido
         expr: up{job="podman"} == 0
@@ -38,8 +62,8 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "High CPU usage on {{ '{{' }} $labels.instance {{ '}}' }}"
-          description: "CPU usage is {{ '{{' }} $value {{ '}}' }}% on {{ '{{' }} $labels.instance {{ '}}' }}"
+          summary: "High CPU usage on {% raw %}{{ $labels.instance }}{% endraw %}"
+          description: "CPU usage is {% raw %}{{ $value }}{% endraw %}% on {% raw %}{{ $labels.instance }}{% endraw %}"
 
       - alert: HighMemoryUsage
         expr: (node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / node_memory_MemTotal_bytes * 100 > 85
@@ -47,8 +71,8 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "High memory usage on {{ '{{' }} $labels.instance {{ '}}' }}"
-          description: "Memory usage is {{ '{{' }} $value {{ '}}' }}% on {{ '{{' }} $labels.instance {{ '}}' }}"
+          summary: "High memory usage on {% raw %}{{ $labels.instance }}{% endraw %}"
+          description: "Memory usage is {% raw %}{{ $value }}{% endraw %}% on {% raw %}{{ $labels.instance }}{% endraw %}"
 
       - alert: LowDiskSpace
         expr: (node_filesystem_avail_bytes{fstype!="tmpfs"} / node_filesystem_size_bytes{fstype!="tmpfs"}) * 100 < 15
@@ -56,8 +80,8 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "Low disk space on {{ '{{' }} $labels.instance {{ '}}' }}"
-          description: "Disk {{ '{{' }} $labels.mountpoint {{ '}}' }} on {{ '{{' }} $labels.instance {{ '}}' }} has only {{ '{{' }} $value {{ '}}' }}% free"
+          summary: "Low disk space on {% raw %}{{ $labels.instance }}{% endraw %}"
+          description: "Disk {% raw %}{{ $labels.mountpoint }}{% endraw %} on {% raw %}{{ $labels.instance }}{% endraw %} has only {% raw %}{{ $value }}{% endraw %}% free"
 
       - alert: NodeDown
         expr: up{job="node"} == 0
