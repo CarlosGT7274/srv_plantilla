@@ -60,6 +60,9 @@ export async function databaseRoutes(fastify: FastifyInstance): Promise<void> {
         type: body.type,
         port: result.port,
         host_port: result.host_port,
+        username: body.username,
+        password: body.password,
+        database: body.database,
         ...(body.external_access ? { external_access: body.external_access } : {}),
       };
       databases.push(metadata);

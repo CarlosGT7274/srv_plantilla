@@ -6,6 +6,8 @@ import simpleGit from 'simple-git';
 import { AppConfig } from '../types.js';
 import { BUILDS_DIR, buildImageViaSock, splitEnvVars, stopAndRemoveContainer, startAppContainer } from './podman.js';
 import { detectProject, generateDockerfile } from './dockerfile.js';
+import { readDatabases } from '../config.js';
+import { resolveLocalRef } from './refs.js';
 
 const QUADLET_DIR = process.env.QUADLET_DIR || '/quadlets';
 
@@ -53,9 +55,6 @@ function detectHealthCheckInCode(buildPath: string): string | null {
 }
 
 // ─── Health probe ─────────────────────────────────────────────────────────────
-// Purely informational — result does NOT affect whether the label is applied.
-// Traefik always gets the healthcheck label; this probe just warns the developer
-// if the app doesn't implement GET /health yet.
 
 async function probeHealthEndpoint(
   app: AppConfig,
@@ -176,9 +175,29 @@ export async function triggerDeploy(
   try {
     log(`Starting deploy for ${app.name}...`);
 
+    // ✅ Inyectar credenciales de BDD automáticamente si se referencia una local
+    const databases = readDatabases();
+    const dbHost = app.env?.DATABASE_HOST || app.env?.DB_HOST;
+    const dbRef = dbHost ? resolveLocalRef(dbHost) : null;
+    const dbConfig = databases.find(d => d.name === dbHost);
+
+    if (dbConfig && dbRef) {
+      log(`🔗  Linking database: ${dbConfig.name}`);
+      app.env = {
+        ...app.env,
+        DATABASE_USER: dbConfig.username || dbConfig.name,
+        DB_USER: dbConfig.username || dbConfig.name,
+        DATABASE_PASSWORD: dbConfig.password || 'changeme',
+        DB_PASSWORD: dbConfig.password || 'changeme',
+        DATABASE_NAME: dbConfig.database || dbConfig.name,
+        DB_NAME: dbConfig.database || dbConfig.name,
+        DATABASE_PORT: String(dbRef.internalPort),
+        DB_PORT: String(dbRef.internalPort),
+      };
+    }
+
     await cloneOrPull(app, buildPath);
 
-    // ✅ Detectar si hay health check en el código
     let healthPath = app.health_path || null;
     if (app.health_check !== false && !healthPath) {
       healthPath = detectHealthCheckInCode(buildPath);

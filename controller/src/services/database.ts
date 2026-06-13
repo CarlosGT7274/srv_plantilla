@@ -7,7 +7,7 @@ import { podmanRequest, stopAndRemoveContainer, containerExists } from './podman
 const QUADLET_DIR = process.env.QUADLET_DIR || '/quadlets';
 const DATABASES_DIR = process.env.DATABASES_DIR || '/home/deploy/databases';
 const SERVER_HOST = process.env.SERVER_HOST || 'localhost';
-const HOST_PORT_RANGE_START = 3300;
+const HOST_PORT_RANGE_START = 3310;
 const HOST_PORT_RANGE_END = 3400;
 
 export interface DatabaseInput {
@@ -41,13 +41,20 @@ const DB_PROFILES: Record<DatabaseType, DbProfile> = {
       const pass = input.password ?? 'changeme';
       const dbName = input.database ?? input.name;
       const port = input.port ?? 3306;
+
+      const env: Record<string, string> = {
+        MYSQL_ROOT_PASSWORD: pass,
+        MYSQL_DATABASE: dbName,
+      };
+
+      // MySQL 8 image fails if MYSQL_USER is 'root'
+      if (user !== 'root') {
+        env.MYSQL_USER = user;
+        env.MYSQL_PASSWORD = pass;
+      }
+
       return {
-        env: {
-          MYSQL_ROOT_PASSWORD: pass,
-          MYSQL_USER: user,
-          MYSQL_PASSWORD: pass,
-          MYSQL_DATABASE: dbName,
-        },
+        env,
         connectionString: `mysql://${user}:${pass}@${input.name}:${port}/${dbName}`,
       };
     },
@@ -82,9 +89,29 @@ function isPortFree(port: number): Promise<boolean> {
   });
 }
 
-async function findFreeHostPort(usedPorts: number[]): Promise<number> {
+async function getPodmanUsedPorts(): Promise<number[]> {
+  const { status, data } = await podmanRequest('GET', '/v5.0.0/libpod/containers/json?all=true');
+  if (status !== 200) return [];
+  const containers = data as any[];
+  const usedPorts: number[] = [];
+  for (const c of containers) {
+    if (c.Ports) {
+      for (const p of c.Ports) {
+        if (p.host_port || p.hostPort) {
+          usedPorts.push(p.host_port || p.hostPort);
+        }
+      }
+    }
+  }
+  return usedPorts;
+}
+
+async function findFreeHostPort(jsonUsedPorts: number[]): Promise<number> {
+  const podmanUsedPorts = await getPodmanUsedPorts();
+  const allUsedPorts = Array.from(new Set([...jsonUsedPorts, ...podmanUsedPorts]));
+
   for (let p = HOST_PORT_RANGE_START; p <= HOST_PORT_RANGE_END; p++) {
-    if (usedPorts.includes(p)) continue;
+    if (allUsedPorts.includes(p)) continue;
     if (await isPortFree(p)) return p;
   }
   throw new Error(`No free port found in range ${HOST_PORT_RANGE_START}-${HOST_PORT_RANGE_END}`);
