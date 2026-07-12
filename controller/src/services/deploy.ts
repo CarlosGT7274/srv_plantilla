@@ -17,6 +17,22 @@ import { resolveLocalRef } from './refs.js';
 
 const QUADLET_DIR = process.env.QUADLET_DIR || '/quadlets';
 
+// ─── Lock por app ─────────────────────────────────────────────────────────
+// Sin esto, dos POST /deploy/:name (o un webhook duplicado + un click
+// manual) para la MISMA app corren en paralelo sobre el mismo
+// CNB_WORK_DIR/<app> (workspace/layers/platform/oci-out) y BUILDS_DIR/<app>
+// (git clone). El resetDir() de cnb.ts de la segunda llamada borra
+// archivos que la primera está usando activamente a mitad del build —
+// eso es lo que produce tanto "ENOTEMPTY" (la segunda, al hacer rm -rf)
+// como el "lstat .../sbom.syft.json: no such file or directory" (la
+// primera, cuando el creator llega a leer un archivo que la segunda ya
+// borró). No es un bug de Paketo/lifecycle, es una carrera de archivos.
+const inFlightDeploys = new Set<string>();
+
+export function isDeployInProgress(name: string): boolean {
+  return inFlightDeploys.has(name);
+}
+
 // ─── Git ─────────────────────────────────────────────────────────────────────
 
 function buildCloneUrl(app: AppConfig): string {
@@ -183,6 +199,13 @@ export async function triggerDeploy(
   app: AppConfig,
   log: (msg: string) => void
 ): Promise<void> {
+  if (inFlightDeploys.has(app.name)) {
+    throw new Error(
+      `Deploy para "${app.name}" ya está en curso — se ignora esta llamada en vez de correr en paralelo sobre el mismo workspace`
+    );
+  }
+  inFlightDeploys.add(app.name);
+
   const buildPath = path.join(BUILDS_DIR, app.name);
 
   try {
@@ -243,7 +266,7 @@ export async function triggerDeploy(
     }
 
     log(`Deploy complete: ${app.name} @ ${imageName}`);
-  } catch (err) {
-    throw err;
+  } finally {
+    inFlightDeploys.delete(app.name);
   }
 }

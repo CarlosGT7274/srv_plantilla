@@ -1,0 +1,112 @@
+---
+# ansible/roles/paas-controller/tasks/deploy.yml
+#
+# Lo único que corre en cada iteración. El rebuild de la imagen es
+# condicional: se calcula un hash del código fuente relevante (controller/src,
+# package*.json, Dockerfile, tsconfig.json) y se compara contra el hash que
+# quedó guardado en el server del último build exitoso. Si no cambió nada
+# relevante, se salta `podman build` por completo (el paso que se llevaba
+# la mayor parte de los ~30 min).
+#
+# El restart del contenedor ya NO es incondicional (antes: state: restarted
+# siempre). Ahora es un handler, disparado solo si: (a) sí hubo build nuevo,
+# o (b) el Quadlet cambió. Si ninguno de los dos cambió, el paso final
+# (`state: started`) es un no-op — el controller ni se reinicia.
+
+- name: Sync Controller source (incluyendo Dockerfile)
+  synchronize:
+    src: "{{ role_path }}/../../../controller/"
+    dest: "{{ controller_dir }}/"
+    recursive: yes
+    delete: yes
+    rsync_opts:
+      - "--exclude=node_modules"
+      - "--exclude=dist"
+      - "--exclude=builds"
+      - "--exclude=config"
+
+# ─── Rebuild condicional ─────────────────────────────────────────────────
+# Hash de todo lo que realmente afecta el resultado de `podman build`:
+# código fuente, manifiestos de dependencias, y el propio Dockerfile.
+# Deliberadamente NO incluye node_modules/dist/builds/config (excluidos
+# también del rsync de arriba) para no invalidar el hash con artefactos
+# de build o config de runtime.
+- name: Compute local source hash (para decidir si hace falta rebuild)
+  delegate_to: localhost
+  become: no
+  shell: >
+    find "{{ role_path }}/../../../controller"
+    \( -path '*/node_modules/*' -o -path '*/dist/*' \) -prune
+    -o -type f
+    \( -path '*/src/*' -o -name 'package.json' -o -name 'package-lock.json'
+       -o -name 'Dockerfile' -o -name 'tsconfig.json' \)
+    -print0
+    | sort -z
+    | xargs -0 sha256sum
+    | sha256sum
+    | awk '{print $1}'
+  register: local_source_hash
+  changed_when: false
+
+- name: Leer hash del último build en el server (si existe)
+  slurp:
+    src: "{{ controller_dir }}/.last_build_hash"
+  register: remote_hash_raw
+  failed_when: false
+
+- name: Determinar si hace falta rebuild
+  set_fact:
+    rebuild_needed: >-
+      {{
+        remote_hash_raw.content is not defined
+        or (remote_hash_raw.content | b64decode | trim) != local_source_hash.stdout
+      }}
+
+- name: Build paas-controller image with Podman
+  command: >
+    podman build
+    -t localhost/paas-controller:latest
+    {{ controller_dir }}
+  become: yes
+  become_user: "{{ deploy_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ deploy_user_info.uid }}"
+  when: rebuild_needed
+  notify: Restart paas-controller
+  register: build_result
+
+- name: Guardar hash del build (solo si el build corrió y fue exitoso)
+  copy:
+    content: "{{ local_source_hash.stdout }}"
+    dest: "{{ controller_dir }}/.last_build_hash"
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: '0644'
+  when: rebuild_needed and build_result is succeeded
+
+- name: Deploy Controller Quadlet
+  template:
+    src: controller.container.j2
+    dest: "/home/{{ deploy_user }}/.config/containers/systemd/paas-controller.container"
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: '0644'
+  notify:
+    - Reload systemd user
+    - Restart paas-controller
+
+- name: Flush handlers
+  meta: flush_handlers
+
+- name: Ensure Controller is started and enabled
+  systemd:
+    name: paas-controller.service
+    scope: user
+    state: started
+    enabled: yes
+    daemon_reload: yes
+  become: yes
+  become_user: "{{ deploy_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ deploy_user_info.uid }}"
+    DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ deploy_user_info.uid }}/bus"

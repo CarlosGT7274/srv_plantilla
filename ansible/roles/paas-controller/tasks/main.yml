@@ -1,104 +1,39 @@
-- name: Install build tools on host
-  dnf:
-    name:
-      - nodejs
-      - npm
-      - git
-      - buildah
-    state: present
-  become: yes
+---
+# ansible/roles/paas-controller/tasks/main.yml
+#
+# El rol se divide en dos etapas:
+#
+#   bootstrap.yml — cosas que solo importan una vez por servidor: paquetes del
+#                   sistema, pack CLI, directorios base, config vacía inicial.
+#                   Ya son idempotentes por diseño (dnf state:present, creates:),
+#                   pero moverlas aquí permite EXCLUIRLAS explícitamente en
+#                   iteración con --tags paas-controller-deploy, en vez de
+#                   depender de que Ansible las note como "no-op" cada vez.
+#
+#   deploy.yml    — lo que sí cambia en cada iteración: sync de código,
+#                   rebuild condicional de la imagen (solo si el código
+#                   realmente cambió), Quadlet, y restart vía handler (no
+#                   forzado).
+#
+# Uso:
+#   ansible-playbook site.yml --tags paas-controller            # todo (prod, sin cambios de comportamiento)
+#   ansible-playbook site.yml --tags paas-controller-bootstrap  # solo una vez / tras cambiar deps del host
+#   ansible-playbook site.yml --tags paas-controller-deploy     # iteración rápida: solo código -> rebuild/restart
 
 - name: Get deploy user info
   user:
     name: "{{ deploy_user }}"
   register: deploy_user_info
+  tags: always
 
-- name: Install pack CLI
-  shell: |
-    curl -sSL "https://github.com/buildpacks/pack/releases/download/v0.35.1/pack-v0.35.1-linux.tgz" | tar -C /usr/local/bin/ --no-same-owner -xzv pack
-  args:
-    creates: /usr/local/bin/pack
-  become: yes
+- name: Bootstrap host dependencies (una sola vez)
+  import_tasks: bootstrap.yml
+  tags:
+    - paas-controller
+    - paas-controller-bootstrap
 
-- name: Sync Controller source (including Dockerfile)
-  synchronize:
-    src: "../../../../controller/"
-    dest: "{{ controller_dir }}/"
-    recursive: yes
-    delete: yes
-    rsync_opts:
-      - "--exclude=node_modules"
-      - "--exclude=dist"
-      - "--exclude=builds"
-      - "--exclude=config"
-
-- name: Create controller directories
-  file:
-    path: "{{ item }}"
-    state: directory
-    owner: "{{ deploy_user }}"
-    group: "{{ deploy_user }}"
-    mode: '0755'
-  loop:
-    - "{{ controller_dir }}"
-    - "{{ controller_dir }}/builds"
-    - "{{ controller_dir }}/config"
-    - "/home/{{ deploy_user }}/cnb-builds"
-
-- name: Create apps.json if not exists
-  copy:
-    content: "[]"
-    dest: "{{ controller_dir }}/config/apps.json"
-    force: no
-    owner: "{{ deploy_user }}"
-    group: "{{ deploy_user }}"
-    mode: '0644'
-
-- name: Create databases.json if not exists
-  copy:
-    content: "[]"
-    dest: "{{ controller_dir }}/config/databases.json"
-    force: no
-    owner: "{{ deploy_user }}"
-    group: "{{ deploy_user }}"
-    mode: '0644'
-
-- name: Build paas-controller image with Podman
-  command: >
-    podman build
-    -t localhost/paas-controller:latest
-    {{ controller_dir }}
-  become: yes
-  become_user: "{{ deploy_user }}"
-  environment:
-    XDG_RUNTIME_DIR: "/run/user/{{ deploy_user_info.uid }}"
-
-- name: Remove old controller.service if exists (migrating to Quadlet)
-  file:
-    path: "/home/{{ deploy_user }}/.config/systemd/user/paas-controller.service"
-    state: absent
-
-- name: Deploy Controller Quadlet
-  template:
-    src: controller.container.j2
-    dest: "/home/{{ deploy_user }}/.config/containers/systemd/paas-controller.container"
-    owner: "{{ deploy_user }}"
-    group: "{{ deploy_user }}"
-    mode: '0644'
-  notify: Reload systemd user
-
-- name: Flush handlers
-  meta: flush_handlers
-
-- name: Ensure Controller is started and enabled
-  systemd:
-    name: paas-controller.service
-    scope: user
-    state: restarted
-    enabled: yes
-    daemon_reload: yes
-  become: yes
-  become_user: "{{ deploy_user }}"
-  environment:
-    XDG_RUNTIME_DIR: "/run/user/{{ deploy_user_info.uid }}"
-    DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ deploy_user_info.uid }}/bus"
+- name: Deploy controller (cada cambio)
+  import_tasks: deploy.yml
+  tags:
+    - paas-controller
+    - paas-controller-deploy

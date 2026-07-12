@@ -2,7 +2,7 @@ import { FastifyInstance } from 'fastify';
 import crypto from 'crypto';
 import { z } from 'zod';
 import { readApps, writeApps } from '../config.js';
-import { triggerDeploy } from '../services/deploy.js';
+import { triggerDeploy, isDeployInProgress } from '../services/deploy.js';
 import { AppConfig } from '../types.js';
 
 const GITHUB_SECRET = process.env.GITHUB_SECRET || '';
@@ -168,6 +168,13 @@ export async function appRoutes(fastify: FastifyInstance): Promise<void> {
       if (!app)
         return reply.status(404).send({ error: `App "${name}" not found` });
 
+      // Evita que dos deploys de la MISMA app corran en paralelo sobre el
+      // mismo workspace (git clone / CNB_WORK_DIR) — ver services/deploy.ts.
+      if (isDeployInProgress(name))
+        return reply.status(409).send({
+          error: `Deploy for "${name}" is already in progress`,
+        });
+
       reply.send({ message: 'Deploy started', app: app.name });
       triggerDeploy(app, (msg) => fastify.log.info(msg)).catch((err: Error) =>
         fastify.log.error(`Deploy failed for ${name}: ${err.message}`)
@@ -185,6 +192,14 @@ export async function appRoutes(fastify: FastifyInstance): Promise<void> {
     const config = readApps();
     const app = config.find((a) => a.repo === payload.repository.clone_url);
     if (!app) return reply.send({ message: 'Repo not managed' });
+
+    // Mismo guard que el deploy manual: un webhook duplicado (GitHub
+    // reintenta si no responde rápido, o un push + un deploy manual casi
+    // simultáneo) no debe pisar un build que ya está corriendo.
+    if (isDeployInProgress(app.name))
+      return reply.status(409).send({
+        error: `Deploy for "${app.name}" is already in progress`,
+      });
 
     reply.send({ message: 'Deploy started', app: app.name });
     triggerDeploy(app, (msg) => fastify.log.info(msg)).catch((err: Error) =>

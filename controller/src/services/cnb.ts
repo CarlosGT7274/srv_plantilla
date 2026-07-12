@@ -16,6 +16,14 @@ const PLATFORM_API = process.env.CNB_PLATFORM_API || '0.12';
 // contra el filesystem real del host, no el del contenedor del controller.
 const CNB_WORK_DIR = process.env.CNB_WORK_DIR || '/home/deploy/cnb-builds';
 
+// Referencia explícita a la run image. `creator` puede resolverla desde
+// /cnb/run.toml dentro del builder por default, pero pasarla explícita evita
+// depender de que ese default siempre resuelva bien en modo -layout (fue
+// justo la ausencia de esta referencia en analyzed.toml lo que rompió el
+// pipeline manual de 4 fases).
+const RUN_IMAGE =
+  process.env.CNB_RUN_IMAGE || 'docker.io/paketobuildpacks/run-jammy-base:latest';
+
 interface BuilderIdentity {
   uid: string;
   gid: string;
@@ -90,7 +98,7 @@ function readOciLayoutRefName(ociOut: string): string {
   const indexPath = path.join(ociOut, 'index.json');
   if (!fs.existsSync(indexPath)) {
     throw new Error(
-      `El exporter no generó ${indexPath} — la fase exporter falló antes de escribir el layout`
+      `El creator no generó ${indexPath} — la exportación falló antes de escribir el layout`
     );
   }
   const index = JSON.parse(fs.readFileSync(indexPath, 'utf-8')) as {
@@ -146,47 +154,35 @@ export async function buildWithCNB(
   );
 
   const user = `${identity.uid}:${identity.gid}`;
-  const runPhase = (entrypoint: string, extraArgs: string[]) =>
-    podmanExec(
-      [
-        'run', '--rm', '-u', user,
-        '-e', `CNB_PLATFORM_API=${PLATFORM_API}`,
-        '-e', 'CNB_EXPERIMENTAL_MODE=warn',
-        '-v', `${workspace}:/workspace`,
-        '-v', `${layers}:/layers`,
-        '-v', `${platform}:/platform`,
-        '-v', `${ociOut}:/oci-out`,
-        '--entrypoint', entrypoint,
-        builderImage,
-        ...extraArgs,
-      ],
-      log
-    );
 
-  log('CNB · detector');
-  await runPhase('/cnb/lifecycle/detector', [
-    '-app', '/workspace', '-layers', '/layers', '-platform', '/platform',
-  ]);
-
-  log('CNB · analyzer');
-  await runPhase('/cnb/lifecycle/analyzer', [
-    '-layout', '-layout-dir', '/oci-out',
-    '-layers', '/layers',
-    imageName,
-  ]);
-
-  log('CNB · builder');
-  await runPhase('/cnb/lifecycle/builder', [
-    '-app', '/workspace', '-layers', '/layers', '-platform', '/platform',
-    '-group', '/layers/group.toml', '-plan', '/layers/plan.toml',
-  ]);
-
-  log('CNB · exporter');
-  await runPhase('/cnb/lifecycle/exporter', [
-    '-app', '/workspace', '-layers', '/layers', '-group', '/layers/group.toml',
-    '-layout', '-layout-dir', '/oci-out',
-    imageName,
-  ]);
+  // ─── Creator ────────────────────────────────────────────────────────────
+  // Una sola invocación: reemplaza detector + analyzer + builder + exporter.
+  // Coordina internamente analyzed.toml/group.toml/plan.toml/run-image —
+  // que es exactamente donde se rompía la orquestación manual de 4 fases
+  // (run image not found in analyzed metadata). Confirmado contra
+  // `creator -help` de esta imagen: soporta -app, -platform, -layers,
+  // -layout, -layout-dir y -run-image.
+  log('CNB · creator');
+  await podmanExec(
+    [
+      'run', '--rm', '-u', user,
+      '-e', `CNB_PLATFORM_API=${PLATFORM_API}`,
+      '-e', 'CNB_EXPERIMENTAL_MODE=warn',
+      '-v', `${workspace}:/workspace`,
+      '-v', `${layers}:/layers`,
+      '-v', `${platform}:/platform`,
+      '-v', `${ociOut}:/oci-out`,
+      '--entrypoint', '/cnb/lifecycle/creator',
+      builderImage,
+      '-app', '/workspace',
+      '-platform', '/platform',
+      '-layers', '/layers',
+      '-run-image', RUN_IMAGE,
+      '-layout', '-layout-dir', '/oci-out',
+      imageName,
+    ],
+    log
+  );
 
   const refName = readOciLayoutRefName(ociOut);
   log(`OCI layout listo (ref=${refName}). Convirtiendo a docker-archive...`);

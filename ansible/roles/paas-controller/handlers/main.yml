@@ -1,0 +1,22 @@
+---
+# ansible/roles/paas-controller/handlers/main.yml
+#
+# Este rol no tenía handlers propios — el restart estaba hardcodeado como
+# `state: restarted` incondicional en tasks/main.yml. "Reload systemd user"
+# se sigue notificando (nombre compartido con otros roles del play, ya
+# resuelto por daemon-reload en otro handler existente) para el
+# daemon-reload tras cambiar el Quadlet. Este handler nuevo es el único
+# responsable de reiniciar el contenedor, y solo se dispara si algo
+# realmente cambió (build nuevo o Quadlet nuevo).
+
+- name: Restart paas-controller
+  systemd:
+    name: paas-controller.service
+    scope: user
+    state: restarted
+    daemon_reload: yes
+  become: yes
+  become_user: "{{ deploy_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ deploy_user_info.uid }}"
+    DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ deploy_user_info.uid }}/bus"

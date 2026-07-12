@@ -1,0 +1,61 @@
+---
+# ansible/roles/paas-controller/tasks/bootstrap.yml
+#
+# Todo esto ya es idempotente (dnf state:present, creates:, force:no), así
+# que en teoría "no hace nada" si ya corrió antes. Pero moverlo a su propio
+# tag permite saltarlo por completo en iteración (--tags paas-controller-deploy)
+# en vez de pagar el costo de que Ansible lo evalúe cada vez (chequeo de dnf,
+# stat de creates:, etc. — barato individualmente, pero se suma).
+
+- name: Install build tools on host
+  dnf:
+    name:
+      - nodejs
+      - npm
+      - git
+      - buildah
+    state: present
+  become: yes
+
+- name: Install pack CLI
+  shell: |
+    curl -sSL "https://github.com/buildpacks/pack/releases/download/v0.35.1/pack-v0.35.1-linux.tgz" | tar -C /usr/local/bin/ --no-same-owner -xzv pack
+  args:
+    creates: /usr/local/bin/pack
+  become: yes
+
+- name: Create controller directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: '0755'
+  loop:
+    - "{{ controller_dir }}"
+    - "{{ controller_dir }}/builds"
+    - "{{ controller_dir }}/config"
+    - "/home/{{ deploy_user }}/cnb-builds"
+
+- name: Create apps.json if not exists
+  copy:
+    content: "[]"
+    dest: "{{ controller_dir }}/config/apps.json"
+    force: no
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: '0644'
+
+- name: Create databases.json if not exists
+  copy:
+    content: "[]"
+    dest: "{{ controller_dir }}/config/databases.json"
+    force: no
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: '0644'
+
+- name: Remove old controller.service if exists (migración a Quadlet)
+  file:
+    path: "/home/{{ deploy_user }}/.config/systemd/user/paas-controller.service"
+    state: absent
