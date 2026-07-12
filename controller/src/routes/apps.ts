@@ -1,7 +1,9 @@
 import { FastifyInstance } from 'fastify';
 import crypto from 'crypto';
-import { readApps } from '../config.js';
+import { z } from 'zod';
+import { readApps, writeApps } from '../config.js';
 import { triggerDeploy } from '../services/deploy.js';
+import { AppConfig } from '../types.js';
 
 const GITHUB_SECRET = process.env.GITHUB_SECRET || '';
 
@@ -15,20 +17,148 @@ function verifySignature(payload: string, signature: string): boolean {
   }
 }
 
+// ─── Validation Schemas ───────────────────────────────────────────────────────
+
+const nameSchema = z
+  .string()
+  .regex(/^[a-z0-9-]+$/, 'name must be lowercase alphanumeric with dashes only');
+
+const envSchema = z.record(z.string(), z.string()).optional();
+
+// Body completo para crear una app nueva (POST) o reemplazarla entera (PUT)
+const appConfigSchema = z.object({
+  name: nameSchema,
+  repo: z.string().url('repo must be a valid URL'),
+  domain: z.string().optional(),
+  port: z.number().int().positive(),
+  private: z.boolean().optional(),
+  github_token: z.string().optional(),
+  env: envSchema,
+  volumes: z.array(z.string()).optional(),
+  health_check: z.boolean().optional(),
+  health_path: z.string().optional(),
+});
+
+// Body parcial para PATCH: cualquier campo excepto "name" (ese va en la URL)
+const appConfigPatchSchema = appConfigSchema.omit({ name: true }).partial();
+
+type AppConfigInput = z.infer<typeof appConfigSchema>;
+type AppConfigPatchInput = z.infer<typeof appConfigPatchSchema>;
+
+function toPublicApp(app: AppConfig): Omit<AppConfig, 'github_token'> {
+  const { github_token, ...rest } = app;
+  return rest;
+}
+
 export async function appRoutes(fastify: FastifyInstance): Promise<void> {
-  // Lista todas las apps configuradas
+  // ─── Listar apps ────────────────────────────────────────────────────────────
   fastify.get('/apps', async () => {
     const config = readApps();
-    return config.map((a) => ({
-      name: a.name,
-      domain: a.domain,
-      port: a.port,
-      private: a.private ?? false,
-      repo: a.repo,
-    }));
+    return config.map(toPublicApp);
   });
 
-  // Deploy manual por nombre
+  // ─── Ver una app específica ─────────────────────────────────────────────────
+  fastify.get<{ Params: { name: string } }>('/apps/:name', async (request, reply) => {
+    const config = readApps();
+    const app = config.find((a) => a.name === request.params.name);
+    if (!app) return reply.status(404).send({ error: `App "${request.params.name}" not found` });
+    return toPublicApp(app);
+  });
+
+  // ─── Crear una app nueva (reemplaza el "vim apps.json") ────────────────────
+  fastify.post<{ Body: unknown }>('/apps', async (request, reply) => {
+    const parsed = appConfigSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: parsed.error.flatten() });
+    }
+    const input: AppConfigInput = parsed.data;
+
+    const config = readApps();
+    if (config.find((a) => a.name === input.name)) {
+      return reply.status(409).send({ error: `App "${input.name}" already exists` });
+    }
+
+    const newApp: AppConfig = { ...input };
+    config.push(newApp);
+    writeApps(config);
+
+    return reply.status(201).send(toPublicApp(newApp));
+  });
+
+  // ─── Reemplazar una app completa (PUT) ──────────────────────────────────────
+  fastify.put<{ Params: { name: string }; Body: unknown }>(
+    '/apps/:name',
+    async (request, reply) => {
+      const { name } = request.params;
+      const parsed = appConfigSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.status(400).send({ error: parsed.error.flatten() });
+      }
+      const input: AppConfigInput = parsed.data;
+
+      if (input.name !== name) {
+        return reply.status(400).send({ error: 'Body "name" must match URL param' });
+      }
+
+      const config = readApps();
+      const index = config.findIndex((a) => a.name === name);
+      if (index === -1) {
+        return reply.status(404).send({ error: `App "${name}" not found` });
+      }
+
+      const updatedApp: AppConfig = { ...input };
+      config[index] = updatedApp;
+      writeApps(config);
+
+      return reply.send(toPublicApp(updatedApp));
+    }
+  );
+
+  // ─── Actualizar parcialmente una app (PATCH) ────────────────────────────────
+  fastify.patch<{ Params: { name: string }; Body: unknown }>(
+    '/apps/:name',
+    async (request, reply) => {
+      const { name } = request.params;
+      const parsed = appConfigPatchSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.status(400).send({ error: parsed.error.flatten() });
+      }
+      const patch: AppConfigPatchInput = parsed.data;
+
+      const config = readApps();
+      const index = config.findIndex((a) => a.name === name);
+      if (index === -1) {
+        return reply.status(404).send({ error: `App "${name}" not found` });
+      }
+
+      const mergedEnv = patch.env
+        ? { ...(config[index].env ?? {}), ...patch.env }
+        : config[index].env;
+
+      const updatedApp: AppConfig = {
+        ...config[index],
+        ...patch,
+        env: mergedEnv,
+      };
+      config[index] = updatedApp;
+      writeApps(config);
+
+      return reply.send(toPublicApp(updatedApp));
+    }
+  );
+
+  // ─── Eliminar una app del config ────────────────────────────────────────────
+  fastify.delete<{ Params: { name: string } }>('/apps/:name', async (request, reply) => {
+    const { name } = request.params;
+    const config = readApps();
+    const app = config.find((a) => a.name === name);
+    if (!app) return reply.status(404).send({ error: `App "${name}" not found` });
+
+    writeApps(config.filter((a) => a.name !== name));
+    return reply.send({ message: `App "${name}" removed from config` });
+  });
+
+  // ─── Deploy manual por nombre ────────────────────────────────────────────────
   fastify.post<{ Params: { name: string } }>(
     '/deploy/:name',
     async (request, reply) => {
@@ -39,13 +169,13 @@ export async function appRoutes(fastify: FastifyInstance): Promise<void> {
         return reply.status(404).send({ error: `App "${name}" not found` });
 
       reply.send({ message: 'Deploy started', app: app.name });
-      triggerDeploy(app, (msg) => fastify.log.info(msg)).catch((err) =>
+      triggerDeploy(app, (msg) => fastify.log.info(msg)).catch((err: Error) =>
         fastify.log.error(`Deploy failed for ${name}: ${err.message}`)
       );
     }
   );
 
-  // Webhook de GitHub
+  // ─── Webhook de GitHub ───────────────────────────────────────────────────────
   fastify.post('/webhook', async (request, reply) => {
     const signature = request.headers['x-hub-signature-256'] as string;
     if (!signature || !verifySignature(JSON.stringify(request.body), signature))
@@ -57,7 +187,7 @@ export async function appRoutes(fastify: FastifyInstance): Promise<void> {
     if (!app) return reply.send({ message: 'Repo not managed' });
 
     reply.send({ message: 'Deploy started', app: app.name });
-    triggerDeploy(app, (msg) => fastify.log.info(msg)).catch((err) =>
+    triggerDeploy(app, (msg) => fastify.log.info(msg)).catch((err: Error) =>
       fastify.log.error(`Deploy failed for ${app.name}: ${err.message}`)
     );
   });

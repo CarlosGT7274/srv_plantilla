@@ -11,6 +11,12 @@ export function readApps(): AppConfig[] {
   return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
 }
 
+export function writeApps(apps: AppConfig[]): void {
+  const dir = path.dirname(CONFIG_PATH);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(apps, null, 2));
+}
+
 export function readDatabases(): DatabaseConfig[] {
   if (!fs.existsSync(DB_CONFIG_PATH)) return [];
   return JSON.parse(fs.readFileSync(DB_CONFIG_PATH, 'utf-8'));

@@ -13,6 +13,7 @@ Volume=/run/user/{{ deploy_user_info.uid }}/podman/podman.sock:/run/user/{{ depl
 Volume={{ controller_dir }}/builds:/app/builds:z
 Volume={{ controller_dir }}/config:/app/config:z
 Volume=/home/{{ deploy_user }}/.config/containers/systemd:/quadlets:z
+Volume=/home/{{ deploy_user }}/databases:/home/{{ deploy_user }}/databases:z
 
 Environment=PORT={{ controller_port }}
 Environment=GITHUB_SECRET={{ controller_github_secret }}
