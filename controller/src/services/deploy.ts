@@ -4,8 +4,14 @@ import { execSync } from 'child_process';
 import { request as httpRequest } from 'http';
 import simpleGit from 'simple-git';
 import { AppConfig } from '../types.js';
-import { BUILDS_DIR, buildImageViaSock, splitEnvVars, stopAndRemoveContainer, startAppContainer } from './podman.js';
-import { detectProject, generateDockerfile } from './dockerfile.js';
+import {
+  BUILDS_DIR,
+  buildImageViaSock,
+  splitEnvVars,
+  stopAndRemoveContainer,
+  startAppContainer,
+} from './podman.js';
+import { buildWithCNB } from './cnb.js';
 import { readDatabases } from '../config.js';
 import { resolveLocalRef } from './refs.js';
 
@@ -31,6 +37,16 @@ async function cloneOrPull(app: AppConfig, buildPath: string): Promise<void> {
   }
 }
 
+// ─── Estrategia de build: Containerfile/Dockerfile vs CNB ───────────────────
+
+function findContainerfile(buildPath: string): string | null {
+  const dockerfile = path.join(buildPath, 'Dockerfile');
+  const containerfile = path.join(buildPath, 'Containerfile');
+  if (fs.existsSync(dockerfile)) return dockerfile;
+  if (fs.existsSync(containerfile)) return containerfile;
+  return null;
+}
+
 // ─── Health detection ─────────────────────────────────────────────────────────
 
 function detectHealthCheckInCode(buildPath: string): string | null {
@@ -45,7 +61,6 @@ function detectHealthCheckInCode(buildPath: string): string | null {
 
     for (const pattern of patterns) {
       try {
-        // Buscamos en src o app, redirigiendo errores para que no rompa el flujo
         execSync(`grep -rli "${pattern}" ${buildPath}/src ${buildPath}/app 2>/dev/null`);
         return '/health';
       } catch { }
@@ -169,8 +184,6 @@ export async function triggerDeploy(
   log: (msg: string) => void
 ): Promise<void> {
   const buildPath = path.join(BUILDS_DIR, app.name);
-  const dockerfilePath = path.join(buildPath, 'Dockerfile');
-  let generatedDockerfile = false;
 
   try {
     log(`Starting deploy for ${app.name}...`);
@@ -211,19 +224,14 @@ export async function triggerDeploy(
 
     const imageName = `localhost/${app.name}:${commitHash}`;
 
-    if (!fs.existsSync(dockerfilePath)) {
-      const type = detectProject(buildPath);
-      log(`Detected project type: ${type}`);
-      fs.writeFileSync(dockerfilePath, generateDockerfile(type, app.port));
-      generatedDockerfile = true;
+    const containerfilePath = findContainerfile(buildPath);
+    if (containerfilePath) {
+      log(`Containerfile/Dockerfile detectado (${path.basename(containerfilePath)}) → build vía Podman/Buildah`);
+      await buildImageViaSock(app, imageName, buildPath, log);
     } else {
-      log(`Using existing Dockerfile`);
+      log(`Sin Containerfile/Dockerfile → build vía Cloud Native Buildpacks`);
+      await buildWithCNB(app, imageName, buildPath, log);
     }
-
-    await buildImageViaSock(app, imageName, buildPath, log);
-
-    if (generatedDockerfile && fs.existsSync(dockerfilePath))
-      fs.unlinkSync(dockerfilePath);
 
     writeAppQuadlet(app, imageName, healthPath);
     await stopAndRemoveContainer(app.name);
@@ -236,8 +244,6 @@ export async function triggerDeploy(
 
     log(`Deploy complete: ${app.name} @ ${imageName}`);
   } catch (err) {
-    if (generatedDockerfile && fs.existsSync(dockerfilePath))
-      fs.unlinkSync(dockerfilePath);
     throw err;
   }
 }

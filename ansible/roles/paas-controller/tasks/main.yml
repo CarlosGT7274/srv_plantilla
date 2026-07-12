@@ -43,6 +43,7 @@
     - "{{ controller_dir }}"
     - "{{ controller_dir }}/builds"
     - "{{ controller_dir }}/config"
+    - "/home/{{ deploy_user }}/cnb-builds"
 
 - name: Create apps.json if not exists
   copy:

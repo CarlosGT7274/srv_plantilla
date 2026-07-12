@@ -14,6 +14,10 @@ Volume={{ controller_dir }}/builds:/app/builds:z
 Volume={{ controller_dir }}/config:/app/config:z
 Volume=/home/{{ deploy_user }}/.config/containers/systemd:/quadlets:z
 Volume=/home/{{ deploy_user }}/databases:/home/{{ deploy_user }}/databases:z
+# CNB: rutas idénticas dentro/fuera del contenedor — los `podman run` que
+# hace cnb.ts corren en modo remoto (CONTAINER_HOST) y montan estos paths
+# contra el filesystem REAL del host, no el del contenedor del controller.
+Volume=/home/{{ deploy_user }}/cnb-builds:/home/{{ deploy_user }}/cnb-builds:z
 
 Environment=PORT={{ controller_port }}
 Environment=GITHUB_SECRET={{ controller_github_secret }}
@@ -25,6 +29,7 @@ Environment=DATABASES_DIR=/home/{{ deploy_user }}/databases
 Environment=CONTAINER_HOST=unix:///run/user/{{ deploy_user_info.uid }}/podman/podman.sock
 Environment=SERVER_HOST={{ ansible_host }}
 Environment=MANAGED_LABEL={{ managed_label_name }}
+Environment=CNB_WORK_DIR=/home/{{ deploy_user }}/cnb-builds
 
 Label={{ managed_label_name }}=true
 Label=traefik.enable=true
@@ -41,3 +46,4 @@ WorkingDirectory=/home/{{ deploy_user }}
 
 [Install]
 WantedBy=default.target
+

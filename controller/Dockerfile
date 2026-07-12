@@ -1,9 +1,11 @@
 FROM node:22-alpine
 
-# Solo necesitamos curl (healthcheck) y git (clonar repos).
-# NO necesitamos podman ni buildah — el build de imágenes se hace
-# via la REST API del socket de Podman del host directamente.
-RUN apk add --no-cache curl git tar
+# curl/git/tar: ya existían (healthcheck, clonar repos, tarball builds).
+# podman: CLI en modo remoto contra CONTAINER_HOST (socket del host) —
+#         usado por cnb.ts para correr las fases del lifecycle y podman load.
+# skopeo: conversión OCI-layout -> docker-archive (operación local, sin
+#         tocar storage de nadie) antes del podman load.
+RUN apk add --no-cache curl git tar podman skopeo
 
 WORKDIR /app
 
