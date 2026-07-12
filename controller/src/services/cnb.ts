@@ -151,6 +151,7 @@ export async function buildWithCNB(
       [
         'run', '--rm', '-u', user,
         '-e', `CNB_PLATFORM_API=${PLATFORM_API}`,
+        '-e', 'CNB_EXPERIMENTAL_MODE=warn',
         '-v', `${workspace}:/workspace`,
         '-v', `${layers}:/layers`,
         '-v', `${platform}:/platform`,
@@ -170,7 +171,7 @@ export async function buildWithCNB(
   log('CNB · analyzer');
   await runPhase('/cnb/lifecycle/analyzer', [
     '-layout', '-layout-dir', '/oci-out',
-    '-app', '/workspace', '-layers', '/layers',
+    '-layers', '/layers',
     imageName,
   ]);
 
