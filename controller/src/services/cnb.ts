@@ -247,6 +247,19 @@ export async function buildWithCNB(
   copyRecursive(buildPath, workspace);
   if (app.env) writePlatformEnv(platformEnv, app.env);
 
+  // ─── Procfile automático ───────────────────────────────────────────────
+  // Si el usuario configuró BP_LAUNCHPOINT en el env de la app, generamos
+  // un Procfile explícito en el workspace. Esto es necesario porque algunos
+  // repositorios traen un start.sh que usa herramientas de desarrollo
+  // (como `nest start`) que no existen en la imagen de producción. El
+  // Procfile tiene la prioridad más alta en los buildpacks de Paketo y
+  // anula cualquier start.sh o script de package.json.
+  if (app.env?.BP_LAUNCHPOINT) {
+    const procfilePath = path.join(workspace, 'Procfile');
+    fs.writeFileSync(procfilePath, `web: node ${app.env.BP_LAUNCHPOINT}\n`);
+    log(`Procfile generado automáticamente: web: node ${app.env.BP_LAUNCHPOINT}`);
+  }
+
   // ─── Poblar oci-out con la run image ANTES de correr creator ───────────
   // Sin esto, el analyzer/exporter en modo -layout buscan la run image en
   // una ruta local dentro de -layout-dir y no la encuentran (ver comentario
