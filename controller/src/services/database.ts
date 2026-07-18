@@ -142,7 +142,7 @@ function writeDbQuadlet(
     `Network=proxy-net`,
     `Label=${managedLabel}=true`,
     `PublishPort=127.0.0.1:${hostPort}:${containerPort}`,
-    `Volume=${hostDataDir}:${profile.dataDir}:z`,
+    `Volume=${hostDataDir}:${profile.dataDir}:z,U`,
     envLines,
     ``,
     `[Service]`,

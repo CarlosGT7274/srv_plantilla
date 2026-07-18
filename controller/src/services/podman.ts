@@ -66,6 +66,29 @@ export async function stopAndRemoveContainer(name: string): Promise<void> {
   await podmanRequest('DELETE', `/v5.0.0/libpod/containers/${name}?force=true`);
 }
 
+// ─── Mounts: coherencia de identidad sin conocer UIDs de antemano ───────────
+//
+// Para bind mounts desde el host (volúmenes persistentes de apps o de BDD),
+// el directorio en el host lo crea el propio proceso del controller, con SU
+// uid — típicamente distinto al que va a usar el contenedor de la app.
+//
+// En vez de inspeccionar/chownear manualmente (lo que obligaría a conocer
+// el uid de la imagen de antemano), delegamos en la opción de mount nativa
+// de Podman `U`: ajusta el ownership del mount contra el uid/gid REAL del
+// contenedor en el momento del arranque. Es agnóstico a cualquier imagen,
+// cualquier builder, y no requiere que el controller resuelva ni conozca
+// ningún UID.
+
+function withUOption(opts: string[]): string[] {
+  return opts.includes('U') ? opts : [...opts, 'U'];
+}
+
+/** Variante para specs de volumen en formato Quadlet ("host:container:opts"). */
+export function ensureUOption(volumeSpec: string): string {
+  const [src, dst, ...opts] = volumeSpec.split(':');
+  return [src, dst, ...withUOption(opts)].join(':');
+}
+
 export async function startAppContainer(
   app: AppConfig,
   imageName: string,
@@ -98,6 +121,9 @@ export async function startAppContainer(
     }
   ];
 
+  // Nótese: SIN campo `User`. La identidad de ejecución la decide Podman
+  // leyendo Config.User de la imagen — comportamiento OCI estándar, válido
+  // para cualquier imagen sin que el controller intervenga.
   const body: any = {
     name: app.name,
     image: imageName,
@@ -109,7 +135,7 @@ export async function startAppContainer(
     portmappings,
     mounts: (app.volumes ?? []).map((v) => {
       const [src, dst, ...opts] = v.split(':');
-      return { type: 'bind', source: src, destination: dst, options: opts };
+      return { type: 'bind', source: src, destination: dst, options: withUOption(opts) };
     }),
   };
 
@@ -158,7 +184,7 @@ export async function startDatabaseContainer(
         type: 'bind',
         source: hostDataDir,
         destination: dataDir,
-        options: ['z'],
+        options: withUOption(['z']),
       },
     ],
   };

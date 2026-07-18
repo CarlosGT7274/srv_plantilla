@@ -10,23 +10,15 @@ import {
   splitEnvVars,
   stopAndRemoveContainer,
   startAppContainer,
+  ensureUOption,
 } from './podman.js';
 import { buildWithCNB } from './cnb.js';
+import { resolveIdentityFromLoadedImage } from './image-identity.js';
 import { readDatabases } from '../config.js';
 import { resolveLocalRef } from './refs.js';
 
 const QUADLET_DIR = process.env.QUADLET_DIR || '/quadlets';
 
-// ─── Lock por app ─────────────────────────────────────────────────────────
-// Sin esto, dos POST /deploy/:name (o un webhook duplicado + un click
-// manual) para la MISMA app corren en paralelo sobre el mismo
-// CNB_WORK_DIR/<app> (workspace/layers/platform/oci-out) y BUILDS_DIR/<app>
-// (git clone). El resetDir() de cnb.ts de la segunda llamada borra
-// archivos que la primera está usando activamente a mitad del build —
-// eso es lo que produce tanto "ENOTEMPTY" (la segunda, al hacer rm -rf)
-// como el "lstat .../sbom.syft.json: no such file or directory" (la
-// primera, cuando el creator llega a leer un archivo que la segunda ya
-// borró). No es un bug de Paketo/lifecycle, es una carrera de archivos.
 const inFlightDeploys = new Set<string>();
 
 export function isDeployInProgress(name: string): boolean {
@@ -140,8 +132,11 @@ function writeAppQuadlet(app: AppConfig, imageName: string, healthPath: string |
     .map(([k, v]) => `Environment=${k}=${v}`)
     .join('\n');
 
+  // Cada volumen recibe la opción `U` para que Podman ajuste el ownership
+  // del mount contra la identidad real de la imagen al arrancar — sin que
+  // este archivo necesite conocer ningún UID.
   const volumeLines = (app.volumes ?? [])
-    .map((v) => `Volume=${v}`)
+    .map((v) => `Volume=${ensureUOption(v)}`)
     .join('\n');
 
   const healthLines = healthPath ? [
@@ -165,6 +160,8 @@ function writeAppQuadlet(app: AppConfig, imageName: string, healthPath: string |
 
   const managedLabel = process.env.MANAGED_LABEL || 'servidor-jair.managed';
 
+  // SIN `User=`. La identidad de ejecución la decide Podman a partir de
+  // Config.User de la imagen, sin intervención de este controller.
   const content = [
     `[Unit]`,
     `Description=PaaS App ${app.name}`,
@@ -211,7 +208,6 @@ export async function triggerDeploy(
   try {
     log(`Starting deploy for ${app.name}...`);
 
-    // ✅ Inyectar credenciales de BDD automáticamente si se referencia una local
     const databases = readDatabases();
     const dbHost = app.env?.DATABASE_HOST || app.env?.DB_HOST;
     const dbRef = dbHost ? resolveLocalRef(dbHost) : null;
@@ -254,6 +250,20 @@ export async function triggerDeploy(
     } else {
       log(`Sin Containerfile/Dockerfile → build vía Cloud Native Buildpacks`);
       await buildWithCNB(app, imageName, buildPath, log);
+    }
+
+    // ─── Identidad de la imagen final: solo para auditoría/log ────────────
+    // No se usa para forzar ningún `User=`. Si el build hizo su trabajo
+    // correctamente (ver cnb.ts), Podman ya va a arrancar el contenedor
+    // con esta misma identidad sin que este archivo intervenga.
+    try {
+      const identity = await resolveIdentityFromLoadedImage(imageName);
+      log(
+        `Identidad declarada por la imagen: user="${identity.user || '(root/no declarado)'}"` +
+        (identity.workingDir ? `, workdir=${identity.workingDir}` : '')
+      );
+    } catch (err) {
+      log(`⚠  No se pudo auditar la identidad de la imagen: ${(err as Error).message}`);
     }
 
     writeAppQuadlet(app, imageName, healthPath);

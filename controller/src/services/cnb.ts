@@ -3,6 +3,7 @@ import path from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { AppConfig } from '../types.js';
+import { resolveIdentityFromOciLayout } from './image-identity.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -15,11 +16,6 @@ const PLATFORM_API = process.env.CNB_PLATFORM_API || '0.12';
 // de abajo corren en modo remoto (CONTAINER_HOST) y montan estas rutas
 // contra el filesystem real del host, no el del contenedor del controller.
 const CNB_WORK_DIR = process.env.CNB_WORK_DIR || '/home/deploy/cnb-builds';
-
-interface BuilderIdentity {
-  uid: string;
-  gid: string;
-}
 
 async function podmanExec(args: string[], log: (msg: string) => void): Promise<string> {
   log(`$ podman ${args.join(' ')}`);
@@ -37,22 +33,6 @@ async function podmanExec(args: string[], log: (msg: string) => void): Promise<s
   }
 }
 
-async function getBuilderIdentity(
-  builderImage: string,
-  log: (msg: string) => void
-): Promise<BuilderIdentity> {
-  const stdout = await podmanExec(
-    ['inspect', builderImage, '--format', '{{ range .Config.Env }}{{ println . }}{{ end }}'],
-    log
-  );
-  const lines = stdout.split('\n');
-  const find = (name: string, fallback: string) => {
-    const line = lines.find((l) => l.startsWith(`${name}=`));
-    return line ? line.slice(name.length + 1).trim() : fallback;
-  };
-  return { uid: find('CNB_USER_ID', '1000'), gid: find('CNB_GROUP_ID', '1000') };
-}
-
 async function ensureBuilderPulled(builderImage: string, log: (msg: string) => void): Promise<void> {
   try {
     await podmanExec(['image', 'exists', builderImage], log);
@@ -65,14 +45,9 @@ async function ensureBuilderPulled(builderImage: string, log: (msg: string) => v
 // ─── Run image → OCI layout ──────────────────────────────────────────────
 // Platform API 0.12 con -layout NO resuelve imágenes contra un registry:
 // exige que <run-image> ya exista dentro de -layout-dir, en una ruta
-// derivada de su referencia. Confirmado por el propio lifecycle en el log
-// de ANALYZING de esta builder image:
-//   Image with name "/oci-out/index.docker.io/paketobuildpacks/run-jammy-base/latest" not found
-// i.e. "docker.io/paketobuildpacks/run-jammy-base:latest" -> "index.docker.io/paketobuildpacks/run-jammy-base/latest"
-// Esta función replica esa misma conversión para cualquier referencia tipo
-// "registry/repo:tag" (que es el único formato que usa /cnb/run.toml de
-// los builders de Paketo). No cubre referencias por digest (@sha256) —
-// no hace falta aquí porque run.toml siempre usa tags.
+// derivada de su referencia. Esta conversión es genérica para cualquier
+// referencia tipo "registry/repo:tag" (formato que usa /cnb/run.toml en
+// cualquier builder CNB conforme al spec, no solo Paketo).
 function normalizeOciRef(ref: string): string {
   const slashIdx = ref.indexOf('/');
   if (slashIdx === -1) {
@@ -99,7 +74,6 @@ function refToLayoutPath(ref: string): string {
   let repoPart = normalized;
   let versionPart = 'latest';
 
-  // Soporte para digest (@sha256:...) o tag (:tag)
   if (normalized.includes('@')) {
     const parts = normalized.split('@');
     repoPart = parts[0];
@@ -124,7 +98,6 @@ async function getDefaultRunImageRef(
     ['run', '--rm', '--entrypoint', 'cat', builderImage, '/cnb/run.toml'],
     log
   );
-  // run.toml: [[images]] \n image = "docker.io/paketobuildpacks/run-jammy-base:latest"
   const match = stdout.match(/image\s*=\s*"([^"]+)"/);
   if (!match) {
     throw new Error(`No se pudo leer la run image por default desde /cnb/run.toml de ${builderImage}`);
@@ -229,7 +202,6 @@ export async function buildWithCNB(
 ): Promise<void> {
   const builderImage = BUILDER_IMAGE;
   await ensureBuilderPulled(builderImage, log);
-  const identity = await getBuilderIdentity(builderImage, log);
 
   const base = path.join(CNB_WORK_DIR, app.name);
   const workspace = path.join(base, 'workspace');
@@ -262,43 +234,46 @@ export async function buildWithCNB(
 
   // ─── Poblar oci-out con la run image ANTES de correr creator ───────────
   // Sin esto, el analyzer/exporter en modo -layout buscan la run image en
-  // una ruta local dentro de -layout-dir y no la encuentran (ver comentario
-  // en refToLayoutPath). Leemos la referencia default desde el propio
-  // /cnb/run.toml del builder en vez de hardcodearla, para no depender de
-  // que el stack/run-image de este builder no cambie nunca.
+  // una ruta local dentro de -layout-dir y no la encuentran. Leemos la
+  // referencia default desde el propio /cnb/run.toml del builder en vez
+  // de hardcodearla, para no depender de que el stack/run-image de este
+  // builder no cambie nunca.
   const runImageRef = await getDefaultRunImageRef(builderImage, log);
   await seedRunImageIntoLayout(runImageRef, ociOut, log);
 
-  // El lifecycle corre como el usuario 'cnb' del builder (uid/gid propios de
-  // la imagen). Ajustamos permisos con un contenedor efímero en vez de
-  // `podman unshare` porque unshare es una operación local y no cruza el
-  // socket remoto (CONTAINER_HOST). Incluye oci-out (ya con la run image
-  // adentro) para que el usuario del lifecycle pueda leerla.
-  log(`Ajustando permisos para uid:gid ${identity.uid}:${identity.gid}...`);
-  await podmanExec(
-    [
-      'run', '--rm',
-      '-v', `${workspace}:/w`, '-v', `${layers}:/l`,
-      '-v', `${platform}:/p`, '-v', `${ociOut}:/o`,
-      'docker.io/library/busybox:latest',
-      'chown', '-R', `${identity.uid}:${identity.gid}`, '/w', '/l', '/p', '/o',
-    ],
-    log
+  // ─── Identidad de ejecución de la imagen final ─────────────────────────
+  // La identidad del run-image se usa ÚNICAMENTE para indicarle al lifecycle
+  // con qué uid/gid debe quedar el contenido exportado (vía -uid/-gid del
+  // propio creator, mecanismo provisto por el spec CNB para exactamente
+  // este caso: desacoplar el ownership del contenido exportado de la
+  // identidad con la que corre el propio proceso del lifecycle).
+  //
+  // NO se usa para decidir con qué usuario corre el PROCESO del lifecycle
+  // — eso rompe operaciones internas del lifecycle sobre /layers, que
+  // dependen de la identidad que el BUILDER le da a su propio usuario de
+  // build, no a la del run-image (son imágenes distintas, cada una con su
+  // propio /etc/passwd y sus propios permisos internos independientes).
+  const runImageLayoutDir = path.join(ociOut, refToLayoutPath(runImageRef));
+  const runImageIdentity = resolveIdentityFromOciLayout(runImageLayoutDir);
+  const uid = runImageIdentity.uid ?? '0';
+  const gid = runImageIdentity.gid ?? runImageIdentity.uid ?? '0';
+
+  log(
+    `Identidad del run image (${runImageRef}): uid=${uid} gid=${gid}` +
+    (runImageIdentity.workingDir ? `, workdir=${runImageIdentity.workingDir}` : '')
   );
 
-  const user = `${identity.uid}:${identity.gid}`;
-
   // ─── Creator ────────────────────────────────────────────────────────────
-  // Sin -run-image: dejamos que resuelva por default vía /cnb/run.toml del
-  // builder, que es exactamente la referencia que ya sembramos en oci-out
-  // arriba. Pasar -run-image explícito con un tag de registry rompe en
-  // modo -layout (el parser espera formato local "[path]@[digest]", no un
-  // tag de registry — de ahí el error "identifier  does not have the
-  // format" de la ronda anterior).
+  // Sin -u: el proceso del lifecycle corre con la identidad default del
+  // builder (la que ese builder le da permisos para operar sobre /layers,
+  // /cnb, etc). El ownership de la app exportada se controla vía -uid/-gid,
+  // que apuntan a la identidad del run-image — así el contenido horneado
+  // en la imagen final coincide con Config.User de esa MISMA imagen, sin
+  // que el proceso del lifecycle necesite correr como ese usuario.
   log('CNB · creator');
   await podmanExec(
     [
-      'run', '--rm', '-u', user,
+      'run', '--rm',
       '-e', `CNB_PLATFORM_API=${PLATFORM_API}`,
       '-e', 'CNB_EXPERIMENTAL_MODE=warn',
       '-v', `${workspace}:/workspace`,
@@ -310,6 +285,8 @@ export async function buildWithCNB(
       '-app', '/workspace',
       '-platform', '/platform',
       '-layers', '/layers',
+      '-uid', uid,
+      '-gid', gid,
       '-layout', '-layout-dir', '/oci-out',
       imageName,
     ],
