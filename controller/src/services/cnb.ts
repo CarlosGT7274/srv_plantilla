@@ -3,7 +3,6 @@ import path from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { AppConfig } from '../types.js';
-import { resolveIdentityFromOciLayout } from './image-identity.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -40,6 +39,59 @@ async function ensureBuilderPulled(builderImage: string, log: (msg: string) => v
     log(`Descargando builder CNB ${builderImage}...`);
     await podmanExec(['pull', builderImage], log);
   }
+}
+
+// ─── Identidad del stack (CNB_USER_ID / CNB_GROUP_ID) ────────────────────
+// Spec (RFC 0026, lifecycle-all.md):
+//   -uid  (required) ← env CNB_USER_ID  → "UID of user in the stack's build
+//                                          and run images"
+//   -gid  (required) ← env CNB_GROUP_ID → "GID of user's group in the
+//                                          stack's build and run images"
+// Y de la guía "Create a build base image": "The USER in the image config
+// must match the user indicated by CNB_USER_ID and CNB_GROUP_ID."
+//
+// Es decir: el spec espera UNA sola identidad compartida por el build image
+// Y el run image del mismo stack. -uid/-gid NO es "la identidad que yo
+// quiero que tenga el contenido exportado" tomada de donde sea — es
+// específicamente la identidad que el BUILDER declara vía estas dos env
+// vars. Si el run image reportara una identidad distinta, eso sería una
+// inconsistencia del stack, no algo que el platform deba resolver leyendo
+// el run image por su cuenta.
+//
+// Por eso la leemos del builder, no del OCI layout del run image (que es
+// lo que hacía la versión anterior de este archivo, y por lo que EnsureOwner
+// del lifecycle nunca encontraba coincidencia: exigíamos un uid que ni el
+// propio builder usa).
+interface StackIdentity {
+  uid: string;
+  gid: string;
+}
+
+async function getStackIdentity(
+  builderImage: string,
+  log: (msg: string) => void
+): Promise<StackIdentity> {
+  const stdout = await podmanExec(
+    ['inspect', builderImage, '--format', '{{ range .Config.Env }}{{ println . }}{{ end }}'],
+    log
+  );
+  const lines = stdout.split('\n');
+  const find = (name: string): string | null => {
+    const line = lines.find((l) => l.startsWith(`${name}=`));
+    return line ? line.slice(name.length + 1).trim() : null;
+  };
+
+  const uid = find('CNB_USER_ID');
+  const gid = find('CNB_GROUP_ID');
+
+  if (!uid || !gid) {
+    throw new Error(
+      `El builder ${builderImage} no declara CNB_USER_ID/CNB_GROUP_ID en su ` +
+      `Config.Env — no es un builder CNB conforme al spec, o la imagen está corrupta.`
+    );
+  }
+
+  return { uid, gid };
 }
 
 // ─── Run image → OCI layout ──────────────────────────────────────────────
@@ -203,6 +255,12 @@ export async function buildWithCNB(
   const builderImage = BUILDER_IMAGE;
   await ensureBuilderPulled(builderImage, log);
 
+  // ─── Identidad del stack: SIEMPRE la del builder, nunca la del run image ──
+  // Ver comentario extenso arriba de getStackIdentity(). Esta es la única
+  // fuente de verdad para -uid/-gid del lifecycle.
+  const { uid, gid } = await getStackIdentity(builderImage, log);
+  log(`Identidad del stack (builder CNB_USER_ID/CNB_GROUP_ID): uid=${uid} gid=${gid}`);
+
   const base = path.join(CNB_WORK_DIR, app.name);
   const workspace = path.join(base, 'workspace');
   const layers = path.join(base, 'layers');
@@ -220,12 +278,6 @@ export async function buildWithCNB(
   if (app.env) writePlatformEnv(platformEnv, app.env);
 
   // ─── Procfile automático ───────────────────────────────────────────────
-  // Si el usuario configuró BP_LAUNCHPOINT en el env de la app, generamos
-  // un Procfile explícito en el workspace. Esto es necesario porque algunos
-  // repositorios traen un start.sh que usa herramientas de desarrollo
-  // (como `nest start`) que no existen en la imagen de producción. El
-  // Procfile tiene la prioridad más alta en los buildpacks de Paketo y
-  // anula cualquier start.sh o script de package.json.
   if (app.env?.BP_LAUNCHPOINT) {
     const procfilePath = path.join(workspace, 'Procfile');
     fs.writeFileSync(procfilePath, `web: node ${app.env.BP_LAUNCHPOINT}\n`);
@@ -233,47 +285,44 @@ export async function buildWithCNB(
   }
 
   // ─── Poblar oci-out con la run image ANTES de correr creator ───────────
-  // Sin esto, el analyzer/exporter en modo -layout buscan la run image en
-  // una ruta local dentro de -layout-dir y no la encuentran. Leemos la
-  // referencia default desde el propio /cnb/run.toml del builder en vez
-  // de hardcodearla, para no depender de que el stack/run-image de este
-  // builder no cambie nunca.
   const runImageRef = await getDefaultRunImageRef(builderImage, log);
   await seedRunImageIntoLayout(runImageRef, ociOut, log);
 
-  // ─── Identidad de ejecución de la imagen final ─────────────────────────
-  // La identidad del run-image se usa ÚNICAMENTE para indicarle al lifecycle
-  // con qué uid/gid debe quedar el contenido exportado (vía -uid/-gid del
-  // propio creator, mecanismo provisto por el spec CNB para exactamente
-  // este caso: desacoplar el ownership del contenido exportado de la
-  // identidad con la que corre el propio proceso del lifecycle).
-  //
-  // NO se usa para decidir con qué usuario corre el PROCESO del lifecycle
-  // — eso rompe operaciones internas del lifecycle sobre /layers, que
-  // dependen de la identidad que el BUILDER le da a su propio usuario de
-  // build, no a la del run-image (son imágenes distintas, cada una con su
-  // propio /etc/passwd y sus propios permisos internos independientes).
-  const runImageLayoutDir = path.join(ociOut, refToLayoutPath(runImageRef));
-  const runImageIdentity = resolveIdentityFromOciLayout(runImageLayoutDir);
-  const uid = runImageIdentity.uid ?? '0';
-  const gid = runImageIdentity.gid ?? runImageIdentity.uid ?? '0';
-
-  log(
-    `Identidad del run image (${runImageRef}): uid=${uid} gid=${gid}` +
-    (runImageIdentity.workingDir ? `, workdir=${runImageIdentity.workingDir}` : '')
+  // ─── Pre-chown de workspace/layers/platform/oci-out ─────────────────────
+  // EnsureOwner (fase analyze, incluida en creator) compara el owner actual
+  // de /layers (y afines) contra el -uid/-gid que le pasamos. Si no
+  // coincide, intenta corregirlo con un chown interno — y ese chown SOLO
+  // funciona si el proceso del lifecycle es root. Como más abajo corremos
+  // creator con `-u <uid>:<gid>` (no root), ese chown interno fallaría con
+  // "operation not permitted" si el ownership no está ya correcto de
+  // antemano. Por eso lo dejamos correcto ANTES, con un contenedor efímero
+  // que sí corre como root (sin -u), evitando depender del chown interno
+  // del lifecycle por completo.
+  log(`Ajustando ownership de workspace/layers/platform/oci-out a ${uid}:${gid}...`);
+  await podmanExec(
+    [
+      'run', '--rm',
+      '-v', `${workspace}:/w`,
+      '-v', `${layers}:/l`,
+      '-v', `${platform}:/p`,
+      '-v', `${ociOut}:/o`,
+      'docker.io/library/busybox:latest',
+      'chown', '-R', `${uid}:${gid}`, '/w', '/l', '/p', '/o',
+    ],
+    log
   );
 
   // ─── Creator ────────────────────────────────────────────────────────────
-  // Sin -u: el proceso del lifecycle corre con la identidad default del
-  // builder (la que ese builder le da permisos para operar sobre /layers,
-  // /cnb, etc). El ownership de la app exportada se controla vía -uid/-gid,
-  // que apuntan a la identidad del run-image — así el contenido horneado
-  // en la imagen final coincide con Config.User de esa MISMA imagen, sin
-  // que el proceso del lifecycle necesite correr como ese usuario.
+  // Con -u <uid>:<gid>: el proceso del lifecycle corre exactamente con la
+  // identidad que -uid/-gid le declara. Como el ownership de /workspace,
+  // /layers, /platform y /oci-out ya quedó ajustado al mismo uid:gid en el
+  // paso anterior, EnsureOwner encuentra todo en orden y nunca necesita
+  // ejecutar un chown privilegiado — que es justo lo que fallaba antes.
   log('CNB · creator');
   await podmanExec(
     [
       'run', '--rm',
+      '-u', `${uid}:${gid}`,
       '-e', `CNB_PLATFORM_API=${PLATFORM_API}`,
       '-e', 'CNB_EXPERIMENTAL_MODE=warn',
       '-v', `${workspace}:/workspace`,
