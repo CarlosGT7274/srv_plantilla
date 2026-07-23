@@ -2,9 +2,9 @@ import fs from 'fs';
 import path from 'path';
 import net from 'net';
 import { DatabaseType } from '../types.js';
-import { podmanRequest, stopAndRemoveContainer, containerExists } from './podman.js';
+import { podmanRequest } from './podman.js';
+import { applyQuadlet, teardownUnit } from './systemd.js';
 
-const QUADLET_DIR = process.env.QUADLET_DIR || '/quadlets';
 const DATABASES_DIR = process.env.DATABASES_DIR || '/home/deploy/databases';
 const SERVER_HOST = process.env.SERVER_HOST || 'localhost';
 const HOST_PORT_RANGE_START = 3310;
@@ -47,7 +47,6 @@ const DB_PROFILES: Record<DatabaseType, DbProfile> = {
         MYSQL_DATABASE: dbName,
       };
 
-      // MySQL 8 image fails if MYSQL_USER is 'root'
       if (user !== 'root') {
         env.MYSQL_USER = user;
         env.MYSQL_PASSWORD = pass;
@@ -89,17 +88,25 @@ function isPortFree(port: number): Promise<boolean> {
   });
 }
 
+interface PodmanPortMapping {
+  host_port?: number;
+  hostPort?: number;
+}
+
+interface PodmanContainerSummary {
+  Ports?: PodmanPortMapping[];
+}
+
 async function getPodmanUsedPorts(): Promise<number[]> {
   const { status, data } = await podmanRequest('GET', '/v5.0.0/libpod/containers/json?all=true');
   if (status !== 200) return [];
-  const containers = data as any[];
+  const containers = data as PodmanContainerSummary[];
   const usedPorts: number[] = [];
   for (const c of containers) {
     if (c.Ports) {
       for (const p of c.Ports) {
-        if (p.host_port || p.hostPort) {
-          usedPorts.push(p.host_port || p.hostPort);
-        }
+        const port = p.host_port ?? p.hostPort;
+        if (port) usedPorts.push(port);
       }
     }
   }
@@ -117,12 +124,16 @@ async function findFreeHostPort(jsonUsedPorts: number[]): Promise<number> {
   throw new Error(`No free port found in range ${HOST_PORT_RANGE_START}-${HOST_PORT_RANGE_END}`);
 }
 
-function writeDbQuadlet(
+// ─── Contenido del Quadlet ────────────────────────────────────────────────────
+// Igual que en deploy.ts: solo construye el string. Escribirlo, recargar
+// systemd y reiniciar la unidad es responsabilidad exclusiva de systemd.ts.
+
+function buildDbQuadletContent(
   input: DatabaseInput,
   profile: DbProfile,
   env: Record<string, string>,
   hostPort: number
-): void {
+): string {
   const hostDataDir = path.join(DATABASES_DIR, input.name);
   const containerPort = input.port ?? profile.defaultPort;
   const managedLabel = process.env.MANAGED_LABEL || 'servidor-jair.managed';
@@ -131,7 +142,14 @@ function writeDbQuadlet(
     .map(([k, v]) => `Environment=${k}=${v}`)
     .join('\n');
 
-  const content = [
+  const externalAccessLabels = input.external_access ? [
+    `Label=traefik.enable=true`,
+    `Label=traefik.tcp.routers.${input.name}.entrypoints=${input.type}`,
+    `Label=traefik.tcp.routers.${input.name}.rule=HostSNI(\`*\`)`,
+    `Label=traefik.tcp.services.${input.name}.loadbalancer.server.port=${containerPort}`,
+  ] : [];
+
+  return [
     `[Unit]`,
     `Description=Database ${input.name} (${input.type})`,
     `After=network-online.target`,
@@ -145,6 +163,8 @@ function writeDbQuadlet(
     `Volume=${hostDataDir}:${profile.dataDir}:z,U`,
     envLines,
     ``,
+    ...externalAccessLabels,
+    ``,
     `[Service]`,
     `Restart=always`,
     `RestartSec=5s`,
@@ -152,8 +172,6 @@ function writeDbQuadlet(
     `[Install]`,
     `WantedBy=default.target`,
   ].join('\n').trim();
-
-  fs.writeFileSync(path.join(QUADLET_DIR, `${input.name}.container`), content);
 }
 
 export interface CreateDatabaseResult {
@@ -179,55 +197,9 @@ export async function createDatabase(
   const { env, connectionString } = profile.resolveEnv(input);
 
   fs.mkdirSync(hostDataDir, { recursive: true });
-  writeDbQuadlet(input, profile, env, hostPort);
 
-  const already = await containerExists(input.name);
-
-  if (!already) {
-    const body = {
-      name: input.name,
-      image: profile.image,
-      env,
-      Networks: { 'proxy-net': { aliases: [input.name] } },
-      netns: { nsmode: 'bridge' },
-      restart_policy: 'always',
-      portmappings: [
-        {
-          host_ip: '127.0.0.1',
-          host_port: hostPort,
-          container_port: port,
-          protocol: 'tcp',
-        },
-      ],
-      mounts: [
-        {
-          type: 'bind',
-          source: hostDataDir,
-          destination: profile.dataDir,
-          options: ['z'],
-        },
-      ],
-    };
-
-    log(`Creating container ${input.name}...`);
-    const { status, data } = await podmanRequest(
-      'POST',
-      '/v5.0.0/libpod/containers/create',
-      body
-    );
-    if (status !== 201)
-      throw new Error(`Failed to create container: ${JSON.stringify(data)}`);
-
-    log(`Starting container ${input.name}...`);
-    const { status: s, data: d } = await podmanRequest(
-      'POST',
-      `/v5.0.0/libpod/containers/${input.name}/start`
-    );
-    if (s !== 204)
-      throw new Error(`Failed to start container: ${JSON.stringify(d)}`);
-  } else {
-    log(`Container ${input.name} already exists, adopting...`);
-  }
+  const quadletContent = buildDbQuadletContent(input, profile, env, hostPort);
+  await applyQuadlet(`${input.name}.container`, `${input.name}.service`, quadletContent, log);
 
   log(`Database ${input.name} is up on host port ${hostPort}.`);
   return {
@@ -244,15 +216,14 @@ export async function removeDatabase(
   name: string,
   log: (msg: string) => void
 ): Promise<void> {
-  await stopAndRemoveContainer(name);
-
-  const quadletPath = path.join(QUADLET_DIR, `${name}.container`);
-  if (fs.existsSync(quadletPath)) {
-    fs.unlinkSync(quadletPath);
-    log(`Quadlet removed.`);
-  }
-
+  await teardownUnit(`${name}.container`, `${name}.service`, log);
   log(`Done. Data at ${DATABASES_DIR}/${name} preserved.`);
+}
+
+// ─── Status: sigue siendo lectura pura contra Podman, no ciclo de vida ──────
+
+interface PodmanContainerState {
+  State?: { Status?: string };
 }
 
 export async function getDatabaseStatus(name: string): Promise<{
@@ -264,7 +235,7 @@ export async function getDatabaseStatus(name: string): Promise<{
     `/v5.0.0/libpod/containers/${name}/json`
   );
   if (status !== 200) return { running: false };
-  const info = data as { State?: { Status?: string } };
+  const info = data as PodmanContainerState;
   return {
     running: info.State?.Status === 'running',
     status: info.State?.Status,

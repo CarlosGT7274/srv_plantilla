@@ -8,16 +8,14 @@ import {
   BUILDS_DIR,
   buildImageViaSock,
   splitEnvVars,
-  stopAndRemoveContainer,
-  startAppContainer,
   ensureUOption,
+  podmanRequest,
 } from './podman.js';
 import { buildWithCNB } from './cnb.js';
+import { applyQuadlet } from './systemd.js';
 import { resolveIdentityFromLoadedImage } from './image-identity.js';
 import { readDatabases } from '../config.js';
 import { resolveLocalRef } from './refs.js';
-
-const QUADLET_DIR = process.env.QUADLET_DIR || '/quadlets';
 
 const inFlightDeploys = new Set<string>();
 
@@ -78,6 +76,15 @@ function detectHealthCheckInCode(buildPath: string): string | null {
 }
 
 // ─── Health probe ─────────────────────────────────────────────────────────────
+// Nota: esto es INSPECCIÓN (leer la IP del contenedor ya arrancado por
+// systemd, y hacerle un GET). No crea, arranca ni destruye nada — solo
+// audita. Por eso sigue usando podmanRequest directamente.
+
+interface ContainerInspectInfo {
+  NetworkSettings?: {
+    Networks?: Record<string, { IPAddress?: string }>;
+  };
+}
 
 async function probeHealthEndpoint(
   app: AppConfig,
@@ -86,15 +93,13 @@ async function probeHealthEndpoint(
 ): Promise<void> {
   await new Promise((r) => setTimeout(r, 3000));
 
-  const { status, data } = await podmanInspect(app.name);
+  const { status, data } = await podmanRequest(
+    'GET',
+    `/v5.0.0/libpod/containers/${app.name}/json`
+  );
   if (status !== 200) return;
 
-  const info = data as {
-    NetworkSettings?: {
-      Networks?: Record<string, { IPAddress?: string }>;
-    };
-  };
-
+  const info = data as ContainerInspectInfo;
   const ip = info.NetworkSettings?.Networks?.['proxy-net']?.IPAddress;
   if (!ip) return;
 
@@ -118,23 +123,22 @@ async function probeHealthEndpoint(
   }
 }
 
-async function podmanInspect(name: string): Promise<{ status: number; data: unknown }> {
-  const { podmanRequest } = await import('./podman.js');
-  return podmanRequest('GET', `/v5.0.0/libpod/containers/${name}/json`);
-}
+// ─── Contenido del Quadlet ────────────────────────────────────────────────────
+// Ya NO escribe a disco. Solo construye el string. Quién lo escribe, recarga
+// systemd y reinicia la unidad es exclusivamente services/systemd.ts vía
+// applyQuadlet().
 
-// ─── Quadlet ─────────────────────────────────────────────────────────────────
-
-function writeAppQuadlet(app: AppConfig, imageName: string, healthPath: string | null): void {
+function buildAppQuadletContent(
+  app: AppConfig,
+  imageName: string,
+  healthPath: string | null
+): string {
   const { runtimeEnv } = splitEnvVars(app.env ?? {});
 
   const envLines = Object.entries(runtimeEnv)
     .map(([k, v]) => `Environment=${k}=${v}`)
     .join('\n');
 
-  // Cada volumen recibe la opción `U` para que Podman ajuste el ownership
-  // del mount contra la identidad real de la imagen al arrancar — sin que
-  // este archivo necesite conocer ningún UID.
   const volumeLines = (app.volumes ?? [])
     .map((v) => `Volume=${ensureUOption(v)}`)
     .join('\n');
@@ -160,9 +164,7 @@ function writeAppQuadlet(app: AppConfig, imageName: string, healthPath: string |
 
   const managedLabel = process.env.MANAGED_LABEL || 'servidor-jair.managed';
 
-  // SIN `User=`. La identidad de ejecución la decide Podman a partir de
-  // Config.User de la imagen, sin intervención de este controller.
-  const content = [
+  return [
     `[Unit]`,
     `Description=PaaS App ${app.name}`,
     `After=network-online.target`,
@@ -186,8 +188,6 @@ function writeAppQuadlet(app: AppConfig, imageName: string, healthPath: string |
     `[Install]`,
     `WantedBy=default.target`,
   ].join('\n').trim();
-
-  fs.writeFileSync(path.join(QUADLET_DIR, `${app.name}.container`), content);
 }
 
 // ─── Main deploy ─────────────────────────────────────────────────────────────
@@ -252,10 +252,6 @@ export async function triggerDeploy(
       await buildWithCNB(app, imageName, buildPath, log);
     }
 
-    // ─── Identidad de la imagen final: solo para auditoría/log ────────────
-    // No se usa para forzar ningún `User=`. Si el build hizo su trabajo
-    // correctamente (ver cnb.ts), Podman ya va a arrancar el contenedor
-    // con esta misma identidad sin que este archivo intervenga.
     try {
       const identity = await resolveIdentityFromLoadedImage(imageName);
       log(
@@ -266,9 +262,12 @@ export async function triggerDeploy(
       log(`⚠  No se pudo auditar la identidad de la imagen: ${(err as Error).message}`);
     }
 
-    writeAppQuadlet(app, imageName, healthPath);
-    await stopAndRemoveContainer(app.name);
-    await startAppContainer(app, imageName, healthPath);
+    // ─── Único punto de ciclo de vida: Quadlet + systemd ──────────────────
+    // Ya no se toca la API de Podman para crear/arrancar/destruir. El
+    // controller solo declara el estado deseado (el Quadlet); systemd es
+    // quien lo aplica.
+    const quadletContent = buildAppQuadletContent(app, imageName, healthPath);
+    await applyQuadlet(`${app.name}.container`, `${app.name}.service`, quadletContent, log);
 
     if (healthPath) {
       log(`Probing ${healthPath} endpoint on ${app.name}...`);

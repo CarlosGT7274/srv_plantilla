@@ -10,13 +10,14 @@ Network=proxy-net
 User=0
 
 Volume=/run/user/{{ deploy_user_info.uid }}/podman/podman.sock:/run/user/{{ deploy_user_info.uid }}/podman/podman.sock:rw,z
+# Socket de sesión D-Bus del usuario deploy — indispensable para que
+# systemctl --user dentro de este contenedor controle las unidades reales
+# del host. Sin esto, el controller no tiene forma de aplicar Quadlets.
+Volume=/run/user/{{ deploy_user_info.uid }}/bus:/run/user/{{ deploy_user_info.uid }}/bus
 Volume={{ controller_dir }}/builds:/app/builds:z
 Volume={{ controller_dir }}/config:/app/config:z
 Volume=/home/{{ deploy_user }}/.config/containers/systemd:/quadlets:z
 Volume=/home/{{ deploy_user }}/databases:/home/{{ deploy_user }}/databases:z
-# CNB: rutas idénticas dentro/fuera del contenedor — los `podman run` que
-# hace cnb.ts corren en modo remoto (CONTAINER_HOST) y montan estos paths
-# contra el filesystem REAL del host, no el del contenedor del controller.
 Volume=/home/{{ deploy_user }}/cnb-builds:/home/{{ deploy_user }}/cnb-builds:z
 
 Environment=PORT={{ controller_port }}
@@ -27,6 +28,8 @@ Environment=BUILDS_DIR=/app/builds
 Environment=QUADLET_DIR=/quadlets
 Environment=DATABASES_DIR=/home/{{ deploy_user }}/databases
 Environment=CONTAINER_HOST=unix:///run/user/{{ deploy_user_info.uid }}/podman/podman.sock
+Environment=XDG_RUNTIME_DIR=/run/user/{{ deploy_user_info.uid }}
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{{ deploy_user_info.uid }}/bus
 Environment=SERVER_HOST={{ ansible_host }}
 Environment=MANAGED_LABEL={{ managed_label_name }}
 Environment=CNB_WORK_DIR=/home/{{ deploy_user }}/cnb-builds
@@ -46,4 +49,3 @@ WorkingDirectory=/home/{{ deploy_user }}
 
 [Install]
 WantedBy=default.target
-

@@ -1,3 +1,0 @@
----
-databases_dir: "/home/{{ deploy_user }}/databases"
-managed_databases: []

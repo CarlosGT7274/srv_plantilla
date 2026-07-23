@@ -1,11 +1,9 @@
-FROM node:22-alpine
+FROM node:22-slim
 
-# curl/git/tar: ya existían (healthcheck, clonar repos, tarball builds).
-# podman: CLI en modo remoto contra CONTAINER_HOST (socket del host) —
-#         usado por cnb.ts para correr las fases del lifecycle y podman load.
-# skopeo: conversión OCI-layout -> docker-archive (operación local, sin
-#         tocar storage de nadie) antes del podman load.
-RUN apk add --no-cache curl git tar podman skopeo
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl git tar podman skopeo systemd dbus \
+    && update-ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 

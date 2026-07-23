@@ -14,6 +14,10 @@ export const PODMAN_SOCK =
 export const BUILDS_DIR = process.env.BUILDS_DIR || './builds';
 
 // ─── Core HTTP over Unix socket ──────────────────────────────────────────────
+// Se mantiene: sigue siendo necesario para INSPECCIÓN (health probes,
+// identidad de imagen, conteo de puertos usados). Ya no se usa para crear,
+// arrancar o destruir contenedores — eso es responsabilidad exclusiva de
+// systemd vía services/systemd.ts.
 
 export function podmanRequest(
   method: string,
@@ -50,34 +54,9 @@ export function podmanRequest(
   });
 }
 
-// ─── Container lifecycle ─────────────────────────────────────────────────────
-
-export async function containerExists(name: string): Promise<boolean> {
-  const { status } = await podmanRequest(
-    'GET',
-    `/v5.0.0/libpod/containers/${name}/json`
-  );
-  return status === 200;
-}
-
-export async function stopAndRemoveContainer(name: string): Promise<void> {
-  if (!(await containerExists(name))) return;
-  await podmanRequest('POST', `/v5.0.0/libpod/containers/${name}/stop`);
-  await podmanRequest('DELETE', `/v5.0.0/libpod/containers/${name}?force=true`);
-}
-
 // ─── Mounts: coherencia de identidad sin conocer UIDs de antemano ───────────
-//
-// Para bind mounts desde el host (volúmenes persistentes de apps o de BDD),
-// el directorio en el host lo crea el propio proceso del controller, con SU
-// uid — típicamente distinto al que va a usar el contenedor de la app.
-//
-// En vez de inspeccionar/chownear manualmente (lo que obligaría a conocer
-// el uid de la imagen de antemano), delegamos en la opción de mount nativa
-// de Podman `U`: ajusta el ownership del mount contra el uid/gid REAL del
-// contenedor en el momento del arranque. Es agnóstico a cualquier imagen,
-// cualquier builder, y no requiere que el controller resuelva ni conozca
-// ningún UID.
+// Se mantiene: usado al generar el contenido del Quadlet (deploy.ts /
+// database.ts), no al arrancar contenedores directamente.
 
 function withUOption(opts: string[]): string[] {
   return opts.includes('U') ? opts : [...opts, 'U'];
@@ -87,122 +66,6 @@ function withUOption(opts: string[]): string[] {
 export function ensureUOption(volumeSpec: string): string {
   const [src, dst, ...opts] = volumeSpec.split(':');
   return [src, dst, ...withUOption(opts)].join(':');
-}
-
-export async function startAppContainer(
-  app: AppConfig,
-  imageName: string,
-  healthPath: string | null
-): Promise<void> {
-  const { runtimeEnv } = splitEnvVars(app.env ?? {});
-  const managedLabel = process.env.MANAGED_LABEL || 'servidor-jair.managed';
-
-  const labels: Record<string, string> = {
-    [managedLabel]: 'true',
-  };
-
-  if (app.domain) {
-    labels['traefik.enable'] = 'true';
-    labels[`traefik.http.routers.${app.name}.rule`] = `Host(\`${app.domain}\`)`;
-    labels[`traefik.http.routers.${app.name}.entrypoints`] = 'websecure';
-    labels[`traefik.http.routers.${app.name}.tls.certresolver`] = 'letsencrypt';
-    labels[`traefik.http.services.${app.name}.loadbalancer.server.port`] = String(app.port);
-    if (healthPath) {
-      labels[`traefik.http.services.${app.name}.loadbalancer.healthcheck.path`] = healthPath;
-    }
-  }
-
-  const portmappings = app.domain ? [] : [
-    {
-      host_ip: '127.0.0.1',
-      host_port: app.port + 1000,
-      container_port: app.port,
-      protocol: 'tcp',
-    }
-  ];
-
-  // Nótese: SIN campo `User`. La identidad de ejecución la decide Podman
-  // leyendo Config.User de la imagen — comportamiento OCI estándar, válido
-  // para cualquier imagen sin que el controller intervenga.
-  const body: any = {
-    name: app.name,
-    image: imageName,
-    env: runtimeEnv,
-    Networks: { 'proxy-net': { aliases: [app.name] } },
-    Labels: labels,
-    netns: { nsmode: 'bridge' },
-    restart_policy: 'always',
-    portmappings,
-    mounts: (app.volumes ?? []).map((v) => {
-      const [src, dst, ...opts] = v.split(':');
-      return { type: 'bind', source: src, destination: dst, options: withUOption(opts) };
-    }),
-  };
-
-  if (healthPath) {
-    body.healthconfig = {
-      test: ['CMD-SHELL', `curl -f http://localhost:${app.port}${healthPath} || exit 1`],
-      interval: 10_000_000_000,
-      timeout: 5_000_000_000,
-      retries: 3,
-      start_period: 30_000_000_000,
-    };
-  }
-
-  const { status, data } = await podmanRequest(
-    'POST',
-    '/v5.0.0/libpod/containers/create',
-    body
-  );
-  if (status !== 201)
-    throw new Error(`Failed to create container: ${JSON.stringify(data)}`);
-
-  const { status: s, data: d } = await podmanRequest(
-    'POST',
-    `/v5.0.0/libpod/containers/${app.name}/start`
-  );
-  if (s !== 204)
-    throw new Error(`Failed to start container: ${JSON.stringify(d)}`);
-}
-
-export async function startDatabaseContainer(
-  name: string,
-  image: string,
-  env: Record<string, string>,
-  dataDir: string,
-  hostDataDir: string
-): Promise<void> {
-  const body = {
-    name,
-    image,
-    env,
-    Networks: { 'proxy-net': { aliases: [name] } },
-    netns: { nsmode: 'bridge' },
-    restart_policy: 'always',
-    mounts: [
-      {
-        type: 'bind',
-        source: hostDataDir,
-        destination: dataDir,
-        options: withUOption(['z']),
-      },
-    ],
-  };
-
-  const { status, data } = await podmanRequest(
-    'POST',
-    '/v5.0.0/libpod/containers/create',
-    body
-  );
-  if (status !== 201)
-    throw new Error(`Failed to create DB container: ${JSON.stringify(data)}`);
-
-  const { status: s, data: d } = await podmanRequest(
-    'POST',
-    `/v5.0.0/libpod/containers/${name}/start`
-  );
-  if (s !== 204)
-    throw new Error(`Failed to start DB container: ${JSON.stringify(d)}`);
 }
 
 // ─── Image build ─────────────────────────────────────────────────────────────
