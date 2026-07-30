@@ -6,3 +6,8 @@ controller_dir: "/home/{{ deploy_user }}/paas-controller"
 controller_image: "localhost/paas-controller:{{ controller_version }}"
 controller_github_secret: "holden1095_secret_2026"
 controller_domain: "deploy.{{ main_domain }}"
+# builder-jammy-full (no base): base no trae buildpack de PHP. full sí,
+# vía paketo-buildpacks/php (detección por composer.json, incluye Composer
+# Install CNB). Cualquier lenguaje nuevo que Paketo soporte entra por esta
+# misma imagen sin tocar código del controller.
+controller_cnb_builder_image: "docker.io/paketobuildpacks/builder-jammy-full:latest"

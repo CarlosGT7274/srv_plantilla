@@ -33,6 +33,7 @@ Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{{ deploy_user_info.uid
 Environment=SERVER_HOST={{ ansible_host }}
 Environment=MANAGED_LABEL={{ managed_label_name }}
 Environment=CNB_WORK_DIR=/home/{{ deploy_user }}/cnb-builds
+Environment=CNB_BUILDER_IMAGE={{ controller_cnb_builder_image }}
 
 Label={{ managed_label_name }}=true
 Label=traefik.enable=true
@@ -49,3 +50,4 @@ WorkingDirectory=/home/{{ deploy_user }}
 
 [Install]
 WantedBy=default.target
+
