@@ -312,6 +312,47 @@ export async function buildWithCNB(
     log
   );
 
+  // ─── Leer project.toml y generar order.toml si existe ─────────────────
+  const projectTomlPath = path.join(workspace, 'project.toml');
+  let orderTomlArgs: string[] = [];
+  if (fs.existsSync(projectTomlPath)) {
+    log('project.toml detectado. Obteniendo versiones del builder...');
+    const defaultOrder = await podmanExec(
+      ['run', '--rm', '--entrypoint', 'cat', builderImage, '/cnb/order.toml'],
+      log
+    );
+    const versionMap: Record<string, string> = {};
+    let currentId = '';
+    for (const line of defaultOrder.split('\n')) {
+      const idMatch = line.match(/id\s*=\s*"([^"]+)"/);
+      if (idMatch) currentId = idMatch[1];
+      const versionMatch = line.match(/version\s*=\s*"([^"]+)"/);
+      if (versionMatch && currentId) {
+        versionMap[currentId] = versionMatch[1];
+        currentId = '';
+      }
+    }
+
+    log('Extrayendo grupos de buildpacks del project.toml...');
+    const projectToml = fs.readFileSync(projectTomlPath, 'utf-8');
+    const groupMatches = [...projectToml.matchAll(/id\s*=\s*"([^"]+)"/g)];
+    if (groupMatches.length > 0) {
+      const orderTomlLines = ['[[order]]'];
+      for (const match of groupMatches) {
+        const id = match[1];
+        orderTomlLines.push(`  [[order.group]]\n    id = "${id}"`);
+        if (versionMap[id]) {
+          orderTomlLines.push(`    version = "${versionMap[id]}"`);
+        }
+      }
+      const orderTomlContent = orderTomlLines.join('\n') + '\n';
+      const orderTomlPath = path.join(platform, 'order.toml');
+      fs.writeFileSync(orderTomlPath, orderTomlContent);
+      log(`Generado order.toml en platform/order.toml:\n${orderTomlContent}`);
+      orderTomlArgs = ['-v', `${orderTomlPath}:/cnb/order.toml:ro`];
+    }
+  }
+
   // ─── Creator ────────────────────────────────────────────────────────────
   // Con -u <uid>:<gid>: el proceso del lifecycle corre exactamente con la
   // identidad que -uid/-gid le declara. Como el ownership de /workspace,
@@ -329,6 +370,7 @@ export async function buildWithCNB(
       '-v', `${layers}:/layers`,
       '-v', `${platform}:/platform`,
       '-v', `${ociOut}:/oci-out`,
+      ...orderTomlArgs,
       '--entrypoint', '/cnb/lifecycle/creator',
       builderImage,
       '-app', '/workspace',

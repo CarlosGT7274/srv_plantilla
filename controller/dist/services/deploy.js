@@ -12,19 +12,10 @@ const http_1 = require("http");
 const simple_git_1 = __importDefault(require("simple-git"));
 const podman_js_1 = require("./podman.js");
 const cnb_js_1 = require("./cnb.js");
+const systemd_js_1 = require("./systemd.js");
+const image_identity_js_1 = require("./image-identity.js");
 const config_js_1 = require("../config.js");
 const refs_js_1 = require("./refs.js");
-const QUADLET_DIR = process.env.QUADLET_DIR || '/quadlets';
-// ─── Lock por app ─────────────────────────────────────────────────────────
-// Sin esto, dos POST /deploy/:name (o un webhook duplicado + un click
-// manual) para la MISMA app corren en paralelo sobre el mismo
-// CNB_WORK_DIR/<app> (workspace/layers/platform/oci-out) y BUILDS_DIR/<app>
-// (git clone). El resetDir() de cnb.ts de la segunda llamada borra
-// archivos que la primera está usando activamente a mitad del build —
-// eso es lo que produce tanto "ENOTEMPTY" (la segunda, al hacer rm -rf)
-// como el "lstat .../sbom.syft.json: no such file or directory" (la
-// primera, cuando el creator llega a leer un archivo que la segunda ya
-// borró). No es un bug de Paketo/lifecycle, es una carrera de archivos.
 const inFlightDeploys = new Set();
 function isDeployInProgress(name) {
     return inFlightDeploys.has(name);
@@ -79,10 +70,9 @@ function detectHealthCheckInCode(buildPath) {
     catch { }
     return null;
 }
-// ─── Health probe ─────────────────────────────────────────────────────────────
 async function probeHealthEndpoint(app, log, healthPath) {
     await new Promise((r) => setTimeout(r, 3000));
-    const { status, data } = await podmanInspect(app.name);
+    const { status, data } = await (0, podman_js_1.podmanRequest)('GET', `/v5.0.0/libpod/containers/${app.name}/json`);
     if (status !== 200)
         return;
     const info = data;
@@ -105,18 +95,17 @@ async function probeHealthEndpoint(app, log, healthPath) {
         log(`⚠  ${app.name}: no ${healthPath} endpoint found — add GET ${healthPath} returning 200 to enable Traefik health checks`);
     }
 }
-async function podmanInspect(name) {
-    const { podmanRequest } = await import('./podman.js');
-    return podmanRequest('GET', `/v5.0.0/libpod/containers/${name}/json`);
-}
-// ─── Quadlet ─────────────────────────────────────────────────────────────────
-function writeAppQuadlet(app, imageName, healthPath) {
+// ─── Contenido del Quadlet ────────────────────────────────────────────────────
+// Ya NO escribe a disco. Solo construye el string. Quién lo escribe, recarga
+// systemd y reinicia la unidad es exclusivamente services/systemd.ts vía
+// applyQuadlet().
+function buildAppQuadletContent(app, imageName, healthPath) {
     const { runtimeEnv } = (0, podman_js_1.splitEnvVars)(app.env ?? {});
     const envLines = Object.entries(runtimeEnv)
         .map(([k, v]) => `Environment=${k}=${v}`)
         .join('\n');
     const volumeLines = (app.volumes ?? [])
-        .map((v) => `Volume=${v}`)
+        .map((v) => `Volume=${(0, podman_js_1.ensureUOption)(v)}`)
         .join('\n');
     const healthLines = healthPath ? [
         `HealthCmd=curl -f http://localhost:${app.port}${healthPath} || exit 1`,
@@ -136,7 +125,7 @@ function writeAppQuadlet(app, imageName, healthPath) {
         `PublishPort=127.0.0.1:${app.port + 1000}:${app.port}`
     ];
     const managedLabel = process.env.MANAGED_LABEL || 'servidor-jair.managed';
-    const content = [
+    return [
         `[Unit]`,
         `Description=PaaS App ${app.name}`,
         `After=network-online.target`,
@@ -160,7 +149,6 @@ function writeAppQuadlet(app, imageName, healthPath) {
         `[Install]`,
         `WantedBy=default.target`,
     ].join('\n').trim();
-    fs_1.default.writeFileSync(path_1.default.join(QUADLET_DIR, `${app.name}.container`), content);
 }
 // ─── Main deploy ─────────────────────────────────────────────────────────────
 async function triggerDeploy(app, log) {
@@ -171,7 +159,6 @@ async function triggerDeploy(app, log) {
     const buildPath = path_1.default.join(podman_js_1.BUILDS_DIR, app.name);
     try {
         log(`Starting deploy for ${app.name}...`);
-        // ✅ Inyectar credenciales de BDD automáticamente si se referencia una local
         const databases = (0, config_js_1.readDatabases)();
         const dbHost = app.env?.DATABASE_HOST || app.env?.DB_HOST;
         const dbRef = dbHost ? (0, refs_js_1.resolveLocalRef)(dbHost) : null;
@@ -212,9 +199,20 @@ async function triggerDeploy(app, log) {
             log(`Sin Containerfile/Dockerfile → build vía Cloud Native Buildpacks`);
             await (0, cnb_js_1.buildWithCNB)(app, imageName, buildPath, log);
         }
-        writeAppQuadlet(app, imageName, healthPath);
-        await (0, podman_js_1.stopAndRemoveContainer)(app.name);
-        await (0, podman_js_1.startAppContainer)(app, imageName, healthPath);
+        try {
+            const identity = await (0, image_identity_js_1.resolveIdentityFromLoadedImage)(imageName);
+            log(`Identidad declarada por la imagen: user="${identity.user || '(root/no declarado)'}"` +
+                (identity.workingDir ? `, workdir=${identity.workingDir}` : ''));
+        }
+        catch (err) {
+            log(`⚠  No se pudo auditar la identidad de la imagen: ${err.message}`);
+        }
+        // ─── Único punto de ciclo de vida: Quadlet + systemd ──────────────────
+        // Ya no se toca la API de Podman para crear/arrancar/destruir. El
+        // controller solo declara el estado deseado (el Quadlet); systemd es
+        // quien lo aplica.
+        const quadletContent = buildAppQuadletContent(app, imageName, healthPath);
+        await (0, systemd_js_1.applyQuadlet)(`${app.name}.container`, `${app.name}.service`, quadletContent, log);
         if (healthPath) {
             log(`Probing ${healthPath} endpoint on ${app.name}...`);
             probeHealthEndpoint(app, log, healthPath).catch(() => { });

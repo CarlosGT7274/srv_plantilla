@@ -35,15 +35,6 @@ async function podmanExec(args, log) {
         throw new Error(`podman ${args[0]} failed: ${e.stderr || e.message}`);
     }
 }
-async function getBuilderIdentity(builderImage, log) {
-    const stdout = await podmanExec(['inspect', builderImage, '--format', '{{ range .Config.Env }}{{ println . }}{{ end }}'], log);
-    const lines = stdout.split('\n');
-    const find = (name, fallback) => {
-        const line = lines.find((l) => l.startsWith(`${name}=`));
-        return line ? line.slice(name.length + 1).trim() : fallback;
-    };
-    return { uid: find('CNB_USER_ID', '1000'), gid: find('CNB_GROUP_ID', '1000') };
-}
 async function ensureBuilderPulled(builderImage, log) {
     try {
         await podmanExec(['image', 'exists', builderImage], log);
@@ -53,17 +44,27 @@ async function ensureBuilderPulled(builderImage, log) {
         await podmanExec(['pull', builderImage], log);
     }
 }
+async function getStackIdentity(builderImage, log) {
+    const stdout = await podmanExec(['inspect', builderImage, '--format', '{{ range .Config.Env }}{{ println . }}{{ end }}'], log);
+    const lines = stdout.split('\n');
+    const find = (name) => {
+        const line = lines.find((l) => l.startsWith(`${name}=`));
+        return line ? line.slice(name.length + 1).trim() : null;
+    };
+    const uid = find('CNB_USER_ID');
+    const gid = find('CNB_GROUP_ID');
+    if (!uid || !gid) {
+        throw new Error(`El builder ${builderImage} no declara CNB_USER_ID/CNB_GROUP_ID en su ` +
+            `Config.Env — no es un builder CNB conforme al spec, o la imagen está corrupta.`);
+    }
+    return { uid, gid };
+}
 // ─── Run image → OCI layout ──────────────────────────────────────────────
 // Platform API 0.12 con -layout NO resuelve imágenes contra un registry:
 // exige que <run-image> ya exista dentro de -layout-dir, en una ruta
-// derivada de su referencia. Confirmado por el propio lifecycle en el log
-// de ANALYZING de esta builder image:
-//   Image with name "/oci-out/index.docker.io/paketobuildpacks/run-jammy-base/latest" not found
-// i.e. "docker.io/paketobuildpacks/run-jammy-base:latest" -> "index.docker.io/paketobuildpacks/run-jammy-base/latest"
-// Esta función replica esa misma conversión para cualquier referencia tipo
-// "registry/repo:tag" (que es el único formato que usa /cnb/run.toml de
-// los builders de Paketo). No cubre referencias por digest (@sha256) —
-// no hace falta aquí porque run.toml siempre usa tags.
+// derivada de su referencia. Esta conversión es genérica para cualquier
+// referencia tipo "registry/repo:tag" (formato que usa /cnb/run.toml en
+// cualquier builder CNB conforme al spec, no solo Paketo).
 function normalizeOciRef(ref) {
     const slashIdx = ref.indexOf('/');
     if (slashIdx === -1) {
@@ -87,7 +88,6 @@ function refToLayoutPath(ref) {
     const normalized = normalizeOciRef(ref);
     let repoPart = normalized;
     let versionPart = 'latest';
-    // Soporte para digest (@sha256:...) o tag (:tag)
     if (normalized.includes('@')) {
         const parts = normalized.split('@');
         repoPart = parts[0];
@@ -105,7 +105,6 @@ function refToLayoutPath(ref) {
 }
 async function getDefaultRunImageRef(builderImage, log) {
     const stdout = await podmanExec(['run', '--rm', '--entrypoint', 'cat', builderImage, '/cnb/run.toml'], log);
-    // run.toml: [[images]] \n image = "docker.io/paketobuildpacks/run-jammy-base:latest"
     const match = stdout.match(/image\s*=\s*"([^"]+)"/);
     if (!match) {
         throw new Error(`No se pudo leer la run image por default desde /cnb/run.toml de ${builderImage}`);
@@ -185,7 +184,11 @@ function getOciImageConfigDigest(imageLayoutDir) {
 async function buildWithCNB(app, imageName, buildPath, log) {
     const builderImage = BUILDER_IMAGE;
     await ensureBuilderPulled(builderImage, log);
-    const identity = await getBuilderIdentity(builderImage, log);
+    // ─── Identidad del stack: SIEMPRE la del builder, nunca la del run image ──
+    // Ver comentario extenso arriba de getStackIdentity(). Esta es la única
+    // fuente de verdad para -uid/-gid del lifecycle.
+    const { uid, gid } = await getStackIdentity(builderImage, log);
+    log(`Identidad del stack (builder CNB_USER_ID/CNB_GROUP_ID): uid=${uid} gid=${gid}`);
     const base = path_1.default.join(CNB_WORK_DIR, app.name);
     const workspace = path_1.default.join(base, 'workspace');
     const layers = path_1.default.join(base, 'layers');
@@ -202,60 +205,95 @@ async function buildWithCNB(app, imageName, buildPath, log) {
     if (app.env)
         writePlatformEnv(platformEnv, app.env);
     // ─── Procfile automático ───────────────────────────────────────────────
-    // Si el usuario configuró BP_LAUNCHPOINT en el env de la app, generamos
-    // un Procfile explícito en el workspace. Esto es necesario porque algunos
-    // repositorios traen un start.sh que usa herramientas de desarrollo
-    // (como `nest start`) que no existen en la imagen de producción. El
-    // Procfile tiene la prioridad más alta en los buildpacks de Paketo y
-    // anula cualquier start.sh o script de package.json.
     if (app.env?.BP_LAUNCHPOINT) {
         const procfilePath = path_1.default.join(workspace, 'Procfile');
         fs_1.default.writeFileSync(procfilePath, `web: node ${app.env.BP_LAUNCHPOINT}\n`);
         log(`Procfile generado automáticamente: web: node ${app.env.BP_LAUNCHPOINT}`);
     }
     // ─── Poblar oci-out con la run image ANTES de correr creator ───────────
-    // Sin esto, el analyzer/exporter en modo -layout buscan la run image en
-    // una ruta local dentro de -layout-dir y no la encuentran (ver comentario
-    // en refToLayoutPath). Leemos la referencia default desde el propio
-    // /cnb/run.toml del builder en vez de hardcodearla, para no depender de
-    // que el stack/run-image de este builder no cambie nunca.
     const runImageRef = await getDefaultRunImageRef(builderImage, log);
     await seedRunImageIntoLayout(runImageRef, ociOut, log);
-    // El lifecycle corre como el usuario 'cnb' del builder (uid/gid propios de
-    // la imagen). Ajustamos permisos con un contenedor efímero en vez de
-    // `podman unshare` porque unshare es una operación local y no cruza el
-    // socket remoto (CONTAINER_HOST). Incluye oci-out (ya con la run image
-    // adentro) para que el usuario del lifecycle pueda leerla.
-    log(`Ajustando permisos para uid:gid ${identity.uid}:${identity.gid}...`);
+    // ─── Pre-chown de workspace/layers/platform/oci-out ─────────────────────
+    // EnsureOwner (fase analyze, incluida en creator) compara el owner actual
+    // de /layers (y afines) contra el -uid/-gid que le pasamos. Si no
+    // coincide, intenta corregirlo con un chown interno — y ese chown SOLO
+    // funciona si el proceso del lifecycle es root. Como más abajo corremos
+    // creator con `-u <uid>:<gid>` (no root), ese chown interno fallaría con
+    // "operation not permitted" si el ownership no está ya correcto de
+    // antemano. Por eso lo dejamos correcto ANTES, con un contenedor efímero
+    // que sí corre como root (sin -u), evitando depender del chown interno
+    // del lifecycle por completo.
+    log(`Ajustando ownership de workspace/layers/platform/oci-out a ${uid}:${gid}...`);
     await podmanExec([
         'run', '--rm',
-        '-v', `${workspace}:/w`, '-v', `${layers}:/l`,
-        '-v', `${platform}:/p`, '-v', `${ociOut}:/o`,
+        '-v', `${workspace}:/w`,
+        '-v', `${layers}:/l`,
+        '-v', `${platform}:/p`,
+        '-v', `${ociOut}:/o`,
         'docker.io/library/busybox:latest',
-        'chown', '-R', `${identity.uid}:${identity.gid}`, '/w', '/l', '/p', '/o',
+        'chown', '-R', `${uid}:${gid}`, '/w', '/l', '/p', '/o',
     ], log);
-    const user = `${identity.uid}:${identity.gid}`;
+    // ─── Leer project.toml y generar order.toml si existe ─────────────────
+    const projectTomlPath = path_1.default.join(workspace, 'project.toml');
+    let orderTomlArgs = [];
+    if (fs_1.default.existsSync(projectTomlPath)) {
+        log('project.toml detectado. Obteniendo versiones del builder...');
+        const defaultOrder = await podmanExec(['run', '--rm', '--entrypoint', 'cat', builderImage, '/cnb/order.toml'], log);
+        const versionMap = {};
+        let currentId = '';
+        for (const line of defaultOrder.split('\n')) {
+            const idMatch = line.match(/id\s*=\s*"([^"]+)"/);
+            if (idMatch)
+                currentId = idMatch[1];
+            const versionMatch = line.match(/version\s*=\s*"([^"]+)"/);
+            if (versionMatch && currentId) {
+                versionMap[currentId] = versionMatch[1];
+                currentId = '';
+            }
+        }
+        log('Extrayendo grupos de buildpacks del project.toml...');
+        const projectToml = fs_1.default.readFileSync(projectTomlPath, 'utf-8');
+        const groupMatches = [...projectToml.matchAll(/id\s*=\s*"([^"]+)"/g)];
+        if (groupMatches.length > 0) {
+            const orderTomlLines = ['[[order]]'];
+            for (const match of groupMatches) {
+                const id = match[1];
+                orderTomlLines.push(`  [[order.group]]\n    id = "${id}"`);
+                if (versionMap[id]) {
+                    orderTomlLines.push(`    version = "${versionMap[id]}"`);
+                }
+            }
+            const orderTomlContent = orderTomlLines.join('\n') + '\n';
+            const orderTomlPath = path_1.default.join(platform, 'order.toml');
+            fs_1.default.writeFileSync(orderTomlPath, orderTomlContent);
+            log(`Generado order.toml en platform/order.toml:\n${orderTomlContent}`);
+            orderTomlArgs = ['-v', `${orderTomlPath}:/cnb/order.toml:ro`];
+        }
+    }
     // ─── Creator ────────────────────────────────────────────────────────────
-    // Sin -run-image: dejamos que resuelva por default vía /cnb/run.toml del
-    // builder, que es exactamente la referencia que ya sembramos en oci-out
-    // arriba. Pasar -run-image explícito con un tag de registry rompe en
-    // modo -layout (el parser espera formato local "[path]@[digest]", no un
-    // tag de registry — de ahí el error "identifier  does not have the
-    // format" de la ronda anterior).
+    // Con -u <uid>:<gid>: el proceso del lifecycle corre exactamente con la
+    // identidad que -uid/-gid le declara. Como el ownership de /workspace,
+    // /layers, /platform y /oci-out ya quedó ajustado al mismo uid:gid en el
+    // paso anterior, EnsureOwner encuentra todo en orden y nunca necesita
+    // ejecutar un chown privilegiado — que es justo lo que fallaba antes.
     log('CNB · creator');
     await podmanExec([
-        'run', '--rm', '-u', user,
+        'run', '--rm',
+        '-u', `${uid}:${gid}`,
         '-e', `CNB_PLATFORM_API=${PLATFORM_API}`,
         '-e', 'CNB_EXPERIMENTAL_MODE=warn',
         '-v', `${workspace}:/workspace`,
         '-v', `${layers}:/layers`,
         '-v', `${platform}:/platform`,
         '-v', `${ociOut}:/oci-out`,
+        ...orderTomlArgs,
         '--entrypoint', '/cnb/lifecycle/creator',
         builderImage,
         '-app', '/workspace',
         '-platform', '/platform',
         '-layers', '/layers',
+        '-uid', uid,
+        '-gid', gid,
         '-layout', '-layout-dir', '/oci-out',
         imageName,
     ], log);

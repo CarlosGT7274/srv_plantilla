@@ -10,7 +10,7 @@ const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
 const net_1 = __importDefault(require("net"));
 const podman_js_1 = require("./podman.js");
-const QUADLET_DIR = process.env.QUADLET_DIR || '/quadlets';
+const systemd_js_1 = require("./systemd.js");
 const DATABASES_DIR = process.env.DATABASES_DIR || '/home/deploy/databases';
 const SERVER_HOST = process.env.SERVER_HOST || 'localhost';
 const HOST_PORT_RANGE_START = 3310;
@@ -29,7 +29,6 @@ const DB_PROFILES = {
                 MYSQL_ROOT_PASSWORD: pass,
                 MYSQL_DATABASE: dbName,
             };
-            // MySQL 8 image fails if MYSQL_USER is 'root'
             if (user !== 'root') {
                 env.MYSQL_USER = user;
                 env.MYSQL_PASSWORD = pass;
@@ -77,9 +76,9 @@ async function getPodmanUsedPorts() {
     for (const c of containers) {
         if (c.Ports) {
             for (const p of c.Ports) {
-                if (p.host_port || p.hostPort) {
-                    usedPorts.push(p.host_port || p.hostPort);
-                }
+                const port = p.host_port ?? p.hostPort;
+                if (port)
+                    usedPorts.push(port);
             }
         }
     }
@@ -96,14 +95,23 @@ async function findFreeHostPort(jsonUsedPorts) {
     }
     throw new Error(`No free port found in range ${HOST_PORT_RANGE_START}-${HOST_PORT_RANGE_END}`);
 }
-function writeDbQuadlet(input, profile, env, hostPort) {
+// ─── Contenido del Quadlet ────────────────────────────────────────────────────
+// Igual que en deploy.ts: solo construye el string. Escribirlo, recargar
+// systemd y reiniciar la unidad es responsabilidad exclusiva de systemd.ts.
+function buildDbQuadletContent(input, profile, env, hostPort) {
     const hostDataDir = path_1.default.join(DATABASES_DIR, input.name);
     const containerPort = input.port ?? profile.defaultPort;
     const managedLabel = process.env.MANAGED_LABEL || 'servidor-jair.managed';
     const envLines = Object.entries(env)
         .map(([k, v]) => `Environment=${k}=${v}`)
         .join('\n');
-    const content = [
+    const externalAccessLabels = input.external_access ? [
+        `Label=traefik.enable=true`,
+        `Label=traefik.tcp.routers.${input.name}.entrypoints=${input.type}`,
+        `Label=traefik.tcp.routers.${input.name}.rule=HostSNI(\`*\`)`,
+        `Label=traefik.tcp.services.${input.name}.loadbalancer.server.port=${containerPort}`,
+    ] : [];
+    return [
         `[Unit]`,
         `Description=Database ${input.name} (${input.type})`,
         `After=network-online.target`,
@@ -114,8 +122,10 @@ function writeDbQuadlet(input, profile, env, hostPort) {
         `Network=proxy-net`,
         `Label=${managedLabel}=true`,
         `PublishPort=127.0.0.1:${hostPort}:${containerPort}`,
-        `Volume=${hostDataDir}:${profile.dataDir}:z`,
+        `Volume=${hostDataDir}:${profile.dataDir}:z,U`,
         envLines,
+        ``,
+        ...externalAccessLabels,
         ``,
         `[Service]`,
         `Restart=always`,
@@ -124,7 +134,6 @@ function writeDbQuadlet(input, profile, env, hostPort) {
         `[Install]`,
         `WantedBy=default.target`,
     ].join('\n').trim();
-    fs_1.default.writeFileSync(path_1.default.join(QUADLET_DIR, `${input.name}.container`), content);
 }
 async function createDatabase(input, usedHostPorts, log) {
     const profile = DB_PROFILES[input.type];
@@ -135,45 +144,8 @@ async function createDatabase(input, usedHostPorts, log) {
     const hostDataDir = path_1.default.join(DATABASES_DIR, input.name);
     const { env, connectionString } = profile.resolveEnv(input);
     fs_1.default.mkdirSync(hostDataDir, { recursive: true });
-    writeDbQuadlet(input, profile, env, hostPort);
-    const already = await (0, podman_js_1.containerExists)(input.name);
-    if (!already) {
-        const body = {
-            name: input.name,
-            image: profile.image,
-            env,
-            Networks: { 'proxy-net': { aliases: [input.name] } },
-            netns: { nsmode: 'bridge' },
-            restart_policy: 'always',
-            portmappings: [
-                {
-                    host_ip: '127.0.0.1',
-                    host_port: hostPort,
-                    container_port: port,
-                    protocol: 'tcp',
-                },
-            ],
-            mounts: [
-                {
-                    type: 'bind',
-                    source: hostDataDir,
-                    destination: profile.dataDir,
-                    options: ['z'],
-                },
-            ],
-        };
-        log(`Creating container ${input.name}...`);
-        const { status, data } = await (0, podman_js_1.podmanRequest)('POST', '/v5.0.0/libpod/containers/create', body);
-        if (status !== 201)
-            throw new Error(`Failed to create container: ${JSON.stringify(data)}`);
-        log(`Starting container ${input.name}...`);
-        const { status: s, data: d } = await (0, podman_js_1.podmanRequest)('POST', `/v5.0.0/libpod/containers/${input.name}/start`);
-        if (s !== 204)
-            throw new Error(`Failed to start container: ${JSON.stringify(d)}`);
-    }
-    else {
-        log(`Container ${input.name} already exists, adopting...`);
-    }
+    const quadletContent = buildDbQuadletContent(input, profile, env, hostPort);
+    await (0, systemd_js_1.applyQuadlet)(`${input.name}.container`, `${input.name}.service`, quadletContent, log);
     log(`Database ${input.name} is up on host port ${hostPort}.`);
     return {
         name: input.name,
@@ -185,12 +157,7 @@ async function createDatabase(input, usedHostPorts, log) {
     };
 }
 async function removeDatabase(name, log) {
-    await (0, podman_js_1.stopAndRemoveContainer)(name);
-    const quadletPath = path_1.default.join(QUADLET_DIR, `${name}.container`);
-    if (fs_1.default.existsSync(quadletPath)) {
-        fs_1.default.unlinkSync(quadletPath);
-        log(`Quadlet removed.`);
-    }
+    await (0, systemd_js_1.teardownUnit)(`${name}.container`, `${name}.service`, log);
     log(`Done. Data at ${DATABASES_DIR}/${name} preserved.`);
 }
 async function getDatabaseStatus(name) {

@@ -5,10 +5,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.BUILDS_DIR = exports.PODMAN_SOCK = void 0;
 exports.podmanRequest = podmanRequest;
-exports.containerExists = containerExists;
-exports.stopAndRemoveContainer = stopAndRemoveContainer;
-exports.startAppContainer = startAppContainer;
-exports.startDatabaseContainer = startDatabaseContainer;
+exports.ensureUOption = ensureUOption;
 exports.splitEnvVars = splitEnvVars;
 exports.buildImageViaSock = buildImageViaSock;
 const http_1 = require("http");
@@ -21,6 +18,10 @@ exports.PODMAN_SOCK = process.env.CONTAINER_HOST?.replace('unix://', '') ||
     `/run/user/1000/podman/podman.sock`;
 exports.BUILDS_DIR = process.env.BUILDS_DIR || './builds';
 // ─── Core HTTP over Unix socket ──────────────────────────────────────────────
+// Se mantiene: sigue siendo necesario para INSPECCIÓN (health probes,
+// identidad de imagen, conteo de puertos usados). Ya no se usa para crear,
+// arrancar o destruir contenedores — eso es responsabilidad exclusiva de
+// systemd vía services/systemd.ts.
 function podmanRequest(method, urlPath, body) {
     return new Promise((resolve, reject) => {
         const payload = body ? JSON.stringify(body) : undefined;
@@ -50,94 +51,16 @@ function podmanRequest(method, urlPath, body) {
         req.end();
     });
 }
-// ─── Container lifecycle ─────────────────────────────────────────────────────
-async function containerExists(name) {
-    const { status } = await podmanRequest('GET', `/v5.0.0/libpod/containers/${name}/json`);
-    return status === 200;
+// ─── Mounts: coherencia de identidad sin conocer UIDs de antemano ───────────
+// Se mantiene: usado al generar el contenido del Quadlet (deploy.ts /
+// database.ts), no al arrancar contenedores directamente.
+function withUOption(opts) {
+    return opts.includes('U') ? opts : [...opts, 'U'];
 }
-async function stopAndRemoveContainer(name) {
-    if (!(await containerExists(name)))
-        return;
-    await podmanRequest('POST', `/v5.0.0/libpod/containers/${name}/stop`);
-    await podmanRequest('DELETE', `/v5.0.0/libpod/containers/${name}?force=true`);
-}
-async function startAppContainer(app, imageName, healthPath) {
-    const { runtimeEnv } = splitEnvVars(app.env ?? {});
-    const managedLabel = process.env.MANAGED_LABEL || 'servidor-jair.managed';
-    const labels = {
-        [managedLabel]: 'true',
-    };
-    if (app.domain) {
-        labels['traefik.enable'] = 'true';
-        labels[`traefik.http.routers.${app.name}.rule`] = `Host(\`${app.domain}\`)`;
-        labels[`traefik.http.routers.${app.name}.entrypoints`] = 'websecure';
-        labels[`traefik.http.routers.${app.name}.tls.certresolver`] = 'letsencrypt';
-        labels[`traefik.http.services.${app.name}.loadbalancer.server.port`] = String(app.port);
-        if (healthPath) {
-            labels[`traefik.http.services.${app.name}.loadbalancer.healthcheck.path`] = healthPath;
-        }
-    }
-    const portmappings = app.domain ? [] : [
-        {
-            host_ip: '127.0.0.1',
-            host_port: app.port + 1000,
-            container_port: app.port,
-            protocol: 'tcp',
-        }
-    ];
-    const body = {
-        name: app.name,
-        image: imageName,
-        env: runtimeEnv,
-        Networks: { 'proxy-net': { aliases: [app.name] } },
-        Labels: labels,
-        netns: { nsmode: 'bridge' },
-        restart_policy: 'always',
-        portmappings,
-        mounts: (app.volumes ?? []).map((v) => {
-            const [src, dst, ...opts] = v.split(':');
-            return { type: 'bind', source: src, destination: dst, options: opts };
-        }),
-    };
-    if (healthPath) {
-        body.healthconfig = {
-            test: ['CMD-SHELL', `curl -f http://localhost:${app.port}${healthPath} || exit 1`],
-            interval: 10_000_000_000,
-            timeout: 5_000_000_000,
-            retries: 3,
-            start_period: 30_000_000_000,
-        };
-    }
-    const { status, data } = await podmanRequest('POST', '/v5.0.0/libpod/containers/create', body);
-    if (status !== 201)
-        throw new Error(`Failed to create container: ${JSON.stringify(data)}`);
-    const { status: s, data: d } = await podmanRequest('POST', `/v5.0.0/libpod/containers/${app.name}/start`);
-    if (s !== 204)
-        throw new Error(`Failed to start container: ${JSON.stringify(d)}`);
-}
-async function startDatabaseContainer(name, image, env, dataDir, hostDataDir) {
-    const body = {
-        name,
-        image,
-        env,
-        Networks: { 'proxy-net': { aliases: [name] } },
-        netns: { nsmode: 'bridge' },
-        restart_policy: 'always',
-        mounts: [
-            {
-                type: 'bind',
-                source: hostDataDir,
-                destination: dataDir,
-                options: ['z'],
-            },
-        ],
-    };
-    const { status, data } = await podmanRequest('POST', '/v5.0.0/libpod/containers/create', body);
-    if (status !== 201)
-        throw new Error(`Failed to create DB container: ${JSON.stringify(data)}`);
-    const { status: s, data: d } = await podmanRequest('POST', `/v5.0.0/libpod/containers/${name}/start`);
-    if (s !== 204)
-        throw new Error(`Failed to start DB container: ${JSON.stringify(d)}`);
+/** Variante para specs de volumen en formato Quadlet ("host:container:opts"). */
+function ensureUOption(volumeSpec) {
+    const [src, dst, ...opts] = volumeSpec.split(':');
+    return [src, dst, ...withUOption(opts)].join(':');
 }
 // ─── Image build ─────────────────────────────────────────────────────────────
 const BUILD_TIME_PATTERNS = [
